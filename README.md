@@ -18,7 +18,7 @@ Clone o repositório:
 
 bash
 Copiar código
-git clone https://github.com/seu-usuario/disserta-o-insper.git
+git clone https://github.com/matheusln/disserta-o-insper.git
 Instale os pacotes necessários listados no arquivo requirements.txt (para Python) ou DESCRIPTION/packages.R (para R).
 
 Execute os scripts conforme indicado na documentação para replicar as análises.
