@@ -1,0 +1,227 @@
+---
+title: "(otimizado) 01. base de dados"
+author: "Matheus Lazzari Nicola"
+format: 
+  html:
+    math: mathjax
+    code-fold: true
+    code-summary: "mostre-me o código"
+    embed-resources: true
+    df-print: paged 
+    toc: true
+    toc-depth: 2
+    toc-location: left
+    toc-title: sumário executivo
+    grid:
+      sidebar-width: 200px
+      body-width: 900px  
+      margin-width: 200px
+      gutter-width: 1.5em
+---
+
+<style>
+  p {
+    text-align: justify;
+  }
+</style>
+
+# pactes
+
+```{r}
+
+pkgs<-c("tidyverse", "conflicted", "readxl", "openxlsx", "jsonlite")
+
+new.packages <- pkgs[!(pkgs %in% installed.packages()[,"Package"])]
+
+if(length(new.packages)) install.packages(new.packages)
+
+invisible(lapply(pkgs, library, character.only = TRUE))
+rm(pkgs, new.packages)
+
+conflict_prefer("filter", "dplyr")
+conflict_prefer("lag", "dplyr")
+
+```
+
+# agenda
+
+```{r}
+# Caminhos dos arquivos
+arquivos <- list.files("b. base de dados/", pattern = "agenda.*2024.xlsx", full.names = TRUE)
+
+# Função para ler e processar abas de um arquivo
+ler_agendas <- function(arquivo) {
+  # Ler todas as abas de um arquivo Excel e combiná-las em um único dataframe
+  map_dfr(excel_sheets(arquivo), ~ read_xlsx(arquivo, sheet = .x) |>
+    select(1:13) |>  
+    # Converter todas as colunas para caractere e adicionar a coluna "Data" com o nome da aba
+    mutate(across(everything(), as.character), Data = .x))  
+}
+
+# Ler todos os arquivos e combiná-los em um único dataframe
+agenda <- map_dfr(arquivos, ler_agendas) |>
+  filter(!is.na(CLIENTE), !is.na(`H CARGA`))
+
+# Função para ajudar a limpar os formatos de horas de carregamento
+converter_horas <- function(x) {
+  if (str_detect(x, "^[0-9]+\\.?[0-9]*([eE][-+]?[0-9]+)?$")) {
+    # Caso seja um número decimal ou notação científica, multiplicamos por 24 e convertemos para formato HH:MM
+    return(format(as.POSIXct(as.numeric(x) * 86400, origin = "1970-01-01", tz = "UTC"), "%H:%M"))
+  } else if (str_detect(x, "([0-9]{2}:[0-9]{2})")) {
+    # Extrair hora do formato HH:MM
+    return(str_extract(x, "([0-9]{2}:[0-9]{2})"))
+  } else if (str_detect(x, "([0-9]{2}:[0-9]{2}:[0-9]{2})")) {
+    # Caso tenha o formato completo com segundos, extraímos o HH:MM
+    return(format(ymd_hms(x), "%H:%M"))
+  } else if (str_detect(x, "(até|Até)\\s?(as)?\\s?[0-9]{1,2}\\s?(h|hrs|h)?")) {
+    # Capturar a hora no formato "até Xhrs", "até Xh", "até as X hrs"
+    return(str_extract(x, "[0-9]{1,2}")) |>
+      paste0(":00")
+  } else {
+    return(NA) # Se o formato não for reconhecido
+  }
+}
+
+# Função para separar intervalos ou converter strings de horas
+processar_horas <- function(x) {
+  if (str_detect(x, ">")) {
+    # Se houver um intervalo, dividir em duas partes (hora inicial e hora final)
+    horas_separadas <- str_split(x, " > |> | >", simplify = TRUE)
+    return(list(hora_inicio = horas_separadas[1], hora_fim = horas_separadas[2]))
+  } else {
+    # Caso contrário, converter a hora e manter na coluna de hora inicial
+    hora_convertida <- converter_horas(x)
+    return(list(hora_inicio = hora_convertida, hora_fim = NA))
+  }
+}
+
+# Processar coluna H CARGA e limpar os dados
+agenda.1 = agenda |> 
+  mutate(
+    horas_separadas = map(`H CARGA`, processar_horas),
+    CTE = ifelse(is.na(CTE) & !is.na(TRANSPORTE) & is.na(PLACA), "cancelada", CTE),
+    PLACA = ifelse(str_detect(CTE, "cancelad|recusad|Outra") & is.na(PLACA), "XXX", PLACA),
+    PLACA = ifelse(str_detect(PLACA, regex("^x{4,}$", ignore_case = TRUE)), "XXX", PLACA),
+    UNID = as.factor(ifelse(str_detect(UNID, "Cvel|CVL"), "Cvl", UNID)),
+    CLIENTE = case_when(
+      str_detect(CLIENTE, "ILLUMISOL|ILUMISSOL|ILLUMISSOL") ~ "ILUMISOL",
+      str_detect(CLIENTE, "C VALE|C. VALE") ~ "C.VALE",
+      str_detect(CLIENTE, "GTFOODS|GTFOODS MS|GT FOODS") ~ "GT-FOODS",
+      str_detect(CLIENTE, "ALIMENTOS SUMARÉ|ALIMENTOS SUMARE") ~ "SUMARE",
+      str_detect(CLIENTE, "ESTRELLA GALICIA|ESTRELLA GALLICIA|REVERSA ESTRELLA GALLICIA|ESTRELLA GACILLIA|ESTRELLA GARICIA") ~ "ESTRELLA GALICIA",
+      str_detect(CLIENTE, "NOVABBER") ~ "NOVABEER",
+      str_detect(CLIENTE, "NOVEL FEMSA|NOVEL") ~ "NOVELIS",
+      str_detect(CLIENTE, "DEVOLUÇÃO INAB") ~ "INAB",
+      str_detect(CLIENTE, "ABRAPLAC / IMCAL") ~ "ABRAPLAC",
+      str_detect(CLIENTE, "REFRI GAROTO") ~ "GAROTO",
+      str_detect(CLIENTE, "COCA -|COCA ") ~ "COCA-COLA",
+      str_detect(CLIENTE, "FEMSA|FEMSA VERALLIA|GARRAFEIRA|GARRAFEIRA FEMSA|VASILHAMES FEMSA") ~ "FEMSA",
+      str_detect(CLIENTE, "GAVEA|GAVEA DISTRIBUIDORA") ~ "GAVEA",
+      str_detect(CLIENTE, "DORI") ~ "DORI",
+      str_detect(CLIENTE, "HEINEKEN|HNK Spot Cativo") ~ "HEINEKEN",
+      str_detect(CLIENTE, "INAB|INAB FEMSA") ~ "INAB",
+      str_detect(CLIENTE, "IRMÃOS MARTINELLI|DISTR. MARTINELI") ~ "MARTINELLI",
+      str_detect(CLIENTE, "LEAO FEMSA|LEÃO FEMSA") ~ "LEAO",
+      str_detect(CLIENTE, "LOW AÇUCAR|LOWÇUCAR") ~ "LOW AÇUCAR",
+      str_detect(CLIENTE, "PISANI|PISANI FEMSA ") ~ "PISANI",
+      str_detect(CLIENTE, "REFRIX|REFRIX - TIETE") ~ "REFRIX",
+      str_detect(CLIENTE, "SANTA GEMA|SANTA GEMMA") ~ "SANTA GEMMA",
+      str_detect(CLIENTE, "Copacol") ~ "COPACOL",
+      str_detect(CLIENTE, "COPERSUCAR|UNIGRA BRASIL - COPERSUCAR") ~ "COPERSUCAR",
+      str_detect(CLIENTE, "ZD ALIMENTOS|ZDA ALIMENTOS") ~ "ZD ALIMENTOS",
+      TRUE ~ CLIENTE
+    ),
+    troca_ordem = ifelse(str_detect(TRANSPORTE, " > |-|\\/"), 1, 0),
+    isca = ifelse(str_detect(PALLETS, "ISCA"), 1, 0),
+    isca = replace_na(isca, 0),
+    retorno = ifelse(str_detect(PALLETS, "RET") | str_detect(PESO, "RET") | str_detect(PRIORIDADE, "RET"), 1, 0),
+    PALLETS = suppressWarnings(as.numeric(ifelse(is.na(PALLETS) | str_detect(PALLETS, "ISCA|RET"), 28, PALLETS))),
+    PESO = suppressWarnings(as.numeric(case_when(
+      str_detect(PESO, "Vasilhames|vasilhame") ~ "8000",
+      str_detect(PESO, "^[0-9]+(\\.[0-9]+)?$") ~ PESO,
+      is.na(PESO) ~ "32000",
+      as.numeric(PESO) < 10000 & str_detect(PESO, "\\.") ~ paste0(gsub("\\.", "", PESO), ".000"),
+      as.numeric(PESO) > 100000 ~ as.numeric(PESO) / 10,
+      as.numeric(PESO) > 32000 & str_detect(PALLETS, "12") ~ as.numeric(PESO) / 10,
+      TRUE ~ "32000"
+    ))) / 1000,
+    id_data_carga = parse_date_time(Data, orders = "%d%m%Y"),
+    hora_carga = ifelse(is.na(hora_fim), hora_inicio, hora_fim),
+    hora_carga = ifelse(hora_carga == "" | is.na(hora_carga), NA_character_, ifelse(grepl(":", hora_carga), hora_carga, paste0(hora_carga, ":00"))),
+    troc_h_carga = ifelse(str_detect(`H CARGA`, " > "), 1, 0),
+    cancelada = ifelse(str_detect(CTE, "não carregou|Outra Transp|cancelada|NÃO CARREGOU|N CARREGOU / NF FATURADA ERRADA|cancela pelo cliente|cancelado|NAO CARREGOU|cacnelada"), 1, 0),
+    recusada = ifelse(str_detect(CTE, "recusada"), 1, 0),
+    cliente_monitora = ifelse(str_detect(CTE, "vinculado|vinculada|vinc"), 1, 0),
+    recurso_extra = ifelse(str_detect(PRIORIDADE, "Adicional|EXTRA|Extra|urgente|URGENTE|adicional"), 1, 0),
+    troc_recurso = ifelse(str_detect(PLACA, " > ") | str_detect(MOTORISTA, " > |>"), 1, 0),
+    d_hora_descarga = ifelse(is.na(PRIORIDADE), `DIA E HORA DESC`, ifelse(str_detect(PRIORIDADE, " as "), PRIORIDADE, `DIA E HORA DESC`)),
+    dia_descarga = str_extract(d_hora_descarga, "^\\d{1,2}(?:/\\d{1,2})?"),
+    data_descarga = case_when(
+      str_detect(dia_descarga, "^0$") ~ as.character(id_data_carga),
+      str_detect(d_hora_descarga, regex("SEG", ignore_case = TRUE)) ~ as.character(id_data_carga + days((2 - wday(id_data_carga, week_start = 1)) %% 7)),
+      str_detect(data_descarga, "^\\d{2}$") ~ paste0("2024-08-", dia_descarga),
+      TRUE ~ dia_descarga
+    ),
+    hora1 = str_extract(d_hora_descarga, "(?<=as|AS|-)\\s*\\d{1,2}[:hH]?\\d{0,2}"),
+    hora2 = ifelse(str_detect(d_hora_descarga, ">"), str_trim(str_split_fixed(d_hora_descarga, ">", 2)[, 2]), NA),
+    hora2 = ifelse(str_detect(hora1, "13H"), 13, hora2),
+    hora_descarga = ifelse(is.na(hora2), hora1, hora2),
+    hora_descarga = ifelse(str_detect(hora_descarga, "[0-9]{1,2}"), paste0(hora_descarga, ":00"), hora_descarga),
+    troc_h_descarga = ifelse(str_detect(`DIA E HORA DESC`, " > |\\?"), 1, 0),
+    PRIORIDADE = case_when(
+      str_detect(PESO, "Vasilhames|vasilhame") ~ "TE02",
+      str_detect(PRIORIDADE, " as |\\/|Adicional|EXTRA|Extra|urgente|URGENTE|adicional|\\?|SAI|ok|NA|avisado|spot|KA|OK|Sim|fixo|DESC|desc|ded|DED|Ded|RET|Agendado|emitir|Plano|vanderleia|Vanderleia|Spot|CROSS|0.375") ~ "agenda",
+      is.na(PRIORIDADE) ~ "agenda",
+      suppressWarnings(!is.na(as.numeric(PRIORIDADE)) & as.numeric(PRIORIDADE) > 10) ~ "agenda",
+      str_detect(PRIORIDADE, "PRIORIDADE") ~ "1",
+      str_detect(PRIORIDADE, "Corte|CORTE|CANCELADA") ~ "0",
+      str_detect(PRIORIDADE, "24H|24h") ~ "1",
+      str_detect(PRIORIDADE, "48H|48h") ~ "1",
+      TRUE ~ PRIORIDADE
+    ),
+    `DIA E HORA DESC` = ifelse(str_detect(`DIA E HORA DESC`, "^\\d{1,2} as \\d{1,2}( > \\d{1,2})?$"), `DIA E HORA DESC`, "sem hora"),
+    `DIA E HORA DESC` = replace_na(`DIA E HORA DESC`, "sem hora"),
+    PLACA = PLACA |> str_replace_all("[\r\n]", "") |> str_trim() |> str_replace(".*>\\s*", "") |> str_replace("\\s*-\\s*\\d+$", ""),
+    recusada = ifelse(str_detect(PLACA, regex("SEM RECURSO", ignore_case = TRUE)), 1, recusada),
+    cancelada = ifelse(str_detect(PLACA, regex("SEM RECURSO", ignore_case = TRUE)), 0, cancelada),
+    PLACA = ifelse(str_detect(PLACA, regex("SEM RECURSO", ignore_case = TRUE)), "XXX", PLACA),
+    MOTORISTA = replace_na(MOTORISTA, "sem nome"),
+    id_PLACA = PLACA,
+    id_MDFe = str_extract(CTE, "(?<=Mdf-e\\s)\\d+"),
+    hora_carga = ifelse(is.na(hora_carga), "livre", hora_carga),
+    id_data_descarga = ifelse(is.na(data_descarga), "livre", data_descarga),
+    hora_descarga = ifelse(is.na(hora_descarga), "livre", hora_descarga),
+    possui_prioridade = as.factor(ifelse(str_detect(PRIORIDADE, "agenda|0|TE01|TE02"), 0, 1)),
+    troca_ordem = as.factor(replace_na(troca_ordem, 0)),
+    troc_h_carga = as.factor(troc_h_carga),
+    troc_h_descarga = as.factor(replace_na(troc_h_descarga, 0)),
+    troc_recurso = as.factor(replace_na(troc_recurso, 0)),
+    cancelada = as.factor(replace_na(cancelada, 0)),
+    recusada = as.factor(replace_na(recusada, 0)),
+    recurso_extra = as.factor(replace_na(recurso_extra, 0)),
+    cliente_monitora = as.factor(replace_na(cliente_monitora, 0)),
+    isca = as.factor(isca),
+    retorno = as.factor(replace_na(retorno, 0))
+  ) |>
+  unnest_wider(horas_separadas) |>
+  filter(!is.na(hora_inicio), !is.na(PLACA), !is.na(hora_carga)) |>
+  select(
+    UNID, CLIENTE, ORIGEM, DESTINO, PALLETS, PESO, PRIORIDADE, id_PLACA, id_data_carga, id_MDFe, hora_carga,
+    hora_descarga, troca_ordem, troc_h_carga, troc_h_descarga, troc_recurso, cancelada, recusada,
+    recurso_extra, cliente_monitora, isca, retorno
+  ) |>
+  select(-data_descarga)
+
+```
+
+```{r}
+converter_horas <- function(x) {
+  case_when(
+    str_detect(x, "^[0-9]+\.?[0-9]*([eE][-+]?[0-9]+)?$") ~ format(as.POSIXct(as.numeric(x) * 86400, origin = "1970-01-01", tz = "UTC"), "%H:%M"),
+    str_detect(x, "[0-9]{2}:[0-9]{2}(:[0-9]{2})?") ~ str_extract(x, "[0-9]{2}:[0-9]{2}"),
+    str_detect(x, "(até|Até)\s?(as)?\s?[0-9]{1,2}\s?(h|hrs|h)?") ~ paste0(str_extract(x, "[0-9]{1,2}"), ":00"),
+    TRUE ~ NA_character_
+  )
+}
+```
+

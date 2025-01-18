@@ -1,0 +1,1403 @@
+---
+title: "MPE Dissertação"
+author: "Matheus Lazzari Nicola"
+format: html
+editor: visual
+---
+
+# pacotes
+
+```{r}
+#| warning: false
+#| echo: false
+
+pkgs<-c("tidyverse", "conflicted", "readxl", "openxlsx", "jsonlite")
+
+new.packages <- pkgs[!(pkgs %in% installed.packages()[,"Package"])]
+
+if(length(new.packages)) install.packages(new.packages)
+
+invisible(lapply(pkgs, library, character.only = TRUE))
+rm(pkgs, new.packages)
+
+conflict_prefer("filter", "dplyr")
+conflict_prefer("lag", "dplyr")
+```
+
+# bd agenda
+
+```{r}
+# caminhos dos arquivos
+arquivos <- list.files("b. base de dados/", pattern = "agenda.*2024.xlsx", full.names = TRUE)
+
+# ler todas as abas de um arquivo e processá-las
+ler_agendas = function(arquivo) {
+  abas = excel_sheets(arquivo)
+  # ler e combinar todas as abas de um arquivo
+  abas |> 
+    map_df(~ read_xlsx(arquivo, sheet = .x) |>
+             select(1:13)                   |>
+             mutate_all(as.character)       |>
+             mutate(Data = .x))
+}
+
+# ler todos os arquivos e combiná-los em um único dataframe
+agenda = arquivos |> map_df(ler_agendas)
+
+# eliminar linhas sem clientes e demandas sem recursos alocados
+agenda = agenda |>
+         filter(!is.na(CLIENTE)) |>
+         filter(!is.na(`H CARGA`))
+
+rm(arquivos, ler_agendas)
+
+# Função para ajudar a limpar os formatos de horas de carregamento
+converter_horas <- function(x) {
+  if (str_detect(x, "^[0-9]+\\.?[0-9]*([eE][-+]?[0-9]+)?$")) {
+    # Caso seja um número decimal ou notação científica, multiplicamos por 24 e convertemos para formato HH:MM
+    return(format(as.POSIXct(as.numeric(x) * 86400, origin = "1970-01-01", tz = "UTC"), "%H:%M"))
+  } else if (str_detect(x, "([0-9]{2}:[0-9]{2})")) {
+    # Extrair hora do formato HH:MM
+    return(str_extract(x, "([0-9]{2}:[0-9]{2})"))
+  } else if (str_detect(x, "([0-9]{2}:[0-9]{2}:[0-9]{2})")) {
+    # Caso tenha o formato completo com segundos, extraímos o HH:MM
+    return(format(ymd_hms(x), "%H:%M"))
+  } else if (str_detect(x, "(até|Até)\\s?(as)?\\s?[0-9]{1,2}\\s?(h|hrs|h)?")) {
+    # Capturar a hora no formato "até Xhrs", "até Xh", "até as X hrs"
+    return(str_extract(x, "[0-9]{1,2}")) |>
+      paste0(":00")
+  } else {
+    return(NA) # Se o formato não for reconhecido
+  }
+}
+
+# Função para separar intervalos ou converter strings de horas
+processar_horas <- function(x) {
+  if (str_detect(x, ">")) {
+    # Se houver um intervalo, dividir em duas partes (hora inicial e hora final)
+    horas_separadas <- str_split(x, " > |> | >", simplify = TRUE)
+    return(list(hora_inicio = horas_separadas[1], hora_fim = horas_separadas[2]))
+  } else {
+    # Caso contrário, converter a hora e manter na coluna de hora inicial
+    hora_convertida <- converter_horas(x)
+    return(list(hora_inicio = hora_convertida, hora_fim = NA))
+  }
+}
+
+# Executar a limpeza da coluna H CARGA
+agenda.1 =  agenda                                                                    |>
+            mutate(horas_separadas = map(`H CARGA`, processar_horas))                 |>
+            unnest_wider(horas_separadas)                                             |>
+            filter(!is.na(hora_inicio))                                               |>
+            mutate(CTE = ifelse(is.na(CTE) & !is.na(TRANSPORTE) & is.na(PLACA),
+                                "cancelada", CTE),
+                   PLACA = ifelse(str_detect(CTE, "cancelad|recusad|Outra") & is.na(PLACA),
+                                  "XXX", PLACA),
+                   PLACA = ifelse(str_detect(PLACA, 
+                                             regex("^x{4,}$", ignore_case = TRUE)),
+                                  "XXX", PLACA))                                      |>
+  
+            filter(!is.na(PLACA))                                                     |>
+  
+            mutate(UNID = as.factor(ifelse(str_detect(UNID, "Cvel|CVL"), "Cvl", UNID)),
+                   CLIENTE = ifelse(str_detect(CLIENTE, "ILLUMISOL|ILUMISSOL|ILLUMISSOL"),
+                                    "ILUMISOL", CLIENTE),
+                   CLIENTE = ifelse(str_detect(CLIENTE, "C VALE|C. VALE"),
+                                    "C.VALE", CLIENTE),
+                   CLIENTE = ifelse(str_detect(CLIENTE, "GTFOODS|GTFOODS MS|GT FOODS"),
+                                    "GT-FOODS", CLIENTE),
+                   CLIENTE = ifelse(str_detect(CLIENTE, "ALIMENTOS SUMARÉ|ALIMENTOS SUMARE"),
+                                    "SUMARE", CLIENTE),
+                   CLIENTE = ifelse(str_detect(CLIENTE, "ESTRELLA GALICIA|ESTRELLA GALLICIA|
+                                               |REVERSA ESTRELLA GALLICIA|ESTRELLA GALLICIA|
+                                               |ESTRELLA GACILLIA|ESTRELLA GARICIA"),
+                                    "ESTRELLA GALICIA", CLIENTE),
+                   CLIENTE = ifelse(str_detect(CLIENTE, "NOVABBER"),
+                                    "NOVABEER", CLIENTE),
+                   CLIENTE = ifelse(str_detect(CLIENTE, "NOVEL FEMSA|NOVEL"),
+                                    "NOVELIS", CLIENTE),
+                   CLIENTE = ifelse(str_detect(CLIENTE, "DEVOLUÇÃO INAB"),
+                                    "INAB", CLIENTE),
+                   CLIENTE = ifelse(str_detect(CLIENTE, "ABRAPLAC / IMCAL"),
+                                    "ABRAPLAC", CLIENTE),
+                   CLIENTE = ifelse(str_detect(CLIENTE, "REFRI GAROTO"),
+                                    "GAROTO", CLIENTE),
+                   CLIENTE = ifelse(str_detect(CLIENTE, "COCA -|COCA "),
+                                    "COCA-COLA", CLIENTE),
+                   CLIENTE = ifelse(str_detect(CLIENTE, "FEMSA|FEMSA VERALLIA"),
+                                    "FEMSA", CLIENTE),
+                   CLIENTE = ifelse(str_detect(CLIENTE, "FEMSA|FEMSA VERALLIA|GARRAFEIRA|GARRAFEIRA FEMSA|VASILHAMES FEMSA"),
+                                    "FEMSA", CLIENTE),
+                   CLIENTE = ifelse(str_detect(CLIENTE, "GAVEA|GAVEA DISTRIBUIDORA"),
+                                    "GAVEA", CLIENTE),
+                   CLIENTE = ifelse(str_detect(CLIENTE, "DORI|DORI "),
+                                    "DORI", CLIENTE),
+                   CLIENTE = ifelse(str_detect(CLIENTE, "HEINEKEN|HNK Spot Cativo"),
+                                    "HEINEKEN", CLIENTE),
+                   CLIENTE = ifelse(str_detect(CLIENTE, "INAB|INAB FEMSA"),
+                                    "INAB", CLIENTE),
+                   CLIENTE = ifelse(str_detect(CLIENTE, "IRMÃOS MARTINELLI|DISTR. MARTINELI"),
+                                    "MARTINELLI", CLIENTE),
+                   CLIENTE = ifelse(str_detect(CLIENTE, "LEAO FEMSA|LEÃO FEMSA"),
+                                    "LEAO", CLIENTE),
+                   CLIENTE = ifelse(str_detect(CLIENTE, "LOW AÇUCAR|LOWÇUCAR"),
+                                    "LOW AÇUCAR", CLIENTE),
+                   CLIENTE = ifelse(str_detect(CLIENTE, "PISANI|PISANI FEMSA "),
+                                    "PISANI", CLIENTE),
+                   CLIENTE = ifelse(str_detect(CLIENTE, "REFRIX|REFRIX - TIETE"),
+                                    "REFRIX", CLIENTE),
+                   CLIENTE = ifelse(str_detect(CLIENTE, "SANTA GEMA|SANTA GEMMA"),
+                                    "SANTA GEMMA", CLIENTE),
+                   CLIENTE = ifelse(str_detect(CLIENTE, "DORI|DORI "),
+                                    "DORI", CLIENTE),
+                   CLIENTE = ifelse(str_detect(CLIENTE, "Copacol"),
+                                    "COPACOL", CLIENTE),
+                   CLIENTE = ifelse(str_detect(CLIENTE, "COPERSUCAR|UNIGRA BRASIL - COPERSUCAR"),
+                                    "COPERSUCAR", CLIENTE),
+                   CLIENTE = ifelse(str_detect(CLIENTE, "ZD ALIMENTOS|ZDA ALIMENTOS"),
+                                    "ZD ALIMENTOS", CLIENTE),
+                   CLIENTE = as.factor(CLIENTE))                                      |>
+  
+            mutate(troca_ordem = ifelse(str_detect(TRANSPORTE, " > |-|\\/"), 1, 0))   |>
+  
+            mutate(isca = ifelse(str_detect(PALLETS, "ISCA"), 1, 0),
+                   isca = ifelse(is.na(isca), 0, isca),
+                   retorno = ifelse(str_detect(PALLETS, "RET") | 
+                                    str_detect(PESO, "RET") |
+                                    str_detect(PRIORIDADE, "RET"), 1, 0))             |>
+  
+            mutate(PALLETS = ifelse(str_detect(PALLETS, "ISCA|RET"), 28, PALLETS),
+                   PALLETS = ifelse(is.na(PALLETS), 28, PALLETS),
+                   PALLETS = as.numeric(PALLETS))                                     |>
+  
+            mutate(PESO = ifelse(str_detect(PESO, "Vasilhames|vasilhame"), 8000, PESO),
+                   PESO = ifelse(str_detect(PESO, "^[0-9]+(\\.[0-9]+)?$"), as.numeric(PESO), 32000),
+                   PESO = ifelse(is.na(PESO),  32000, PESO),
+                   PESO = ifelse(as.numeric(PESO) < 10000 & str_detect(PESO, "\\."),
+                                 paste0(gsub("\\.", "", PESO), ".000"),
+                                 PESO),
+                   PESO = ifelse(as.numeric(PESO) > 100000, 
+                                 as.numeric(PESO)/10, PESO),
+                   PESO = ifelse(as.numeric(PESO) > 100000, 
+                                 as.numeric(PESO)/10, PESO),
+                   PESO = ifelse(as.numeric(PESO) > 32000 & str_detect(PALLETS, "12"), 
+                                 as.numeric(PESO)/10, PESO),
+                   PESO = as.numeric(PESO)/1000)                                       |>
+  
+            mutate(id_data_carga = parse_date_time(Data, orders = "%d%m%Y"))                                                   |>
+            mutate(hora_carga = ifelse(is.na(hora_fim), hora_inicio, hora_fim),
+                   hora_carga = ifelse(hora_carga == "" | is.na(hora_carga),
+                                       NA_character_,
+                                       ifelse(grepl(":", hora_carga),
+                                              hora_carga,
+                                              paste0(hora_carga, ":00"))))            |>
+            filter(!is.na(hora_carga))                                                |>
+            
+            mutate(troc_h_carga = ifelse(str_detect(`H CARGA`, " > "), 1, 0),
+                   cancelada    = ifelse(str_detect(CTE, 
+                                                    "não carregou|Outra Transp|cancelada|NÃO CARREGOU|
+                                                    |N CARREGOU / NF FATURADA ERRADA|cancela pelo cliente|
+                                                    |cancelado|NAO CARREGOU|cacnelada"), 1, 0),
+                   recusada         = ifelse(str_detect(CTE, "recusada"), 1, 0),
+                   cliente_monitora = ifelse(str_detect(CTE, "vinculado|vinculada|vinc"), 1, 0),
+                   recurso_extra    = ifelse(str_detect(PRIORIDADE, "Adicional|EXTRA|Extra|
+                                                        |urgente|URGENTE|adicional"),1,0),
+                   troc_recurso = ifelse(str_detect(PLACA, " > "), 1, 0),
+                   troc_recurso = ifelse(str_detect(MOTORISTA, " > |>"), 1, troc_recurso))       |>
+  
+            mutate(separador        = ifelse(str_detect(PRIORIDADE, " as "), PRIORIDADE, `DIA E HORA DESC`),
+                   d_hora_descarga  = ifelse(is.na(PRIORIDADE), `DIA E HORA DESC`, separador),
+                   dia_descarga  = str_extract(d_hora_descarga, "^\\d{1,2}(?:/\\d{1,2})?"),
+                   data_descarga = ifelse(str_detect(dia_descarga, "^0$"), as.character(id_data_carga), dia_descarga),
+                   data_descarga = ifelse(str_detect(d_hora_descarga, regex("SEG", ignore_case = TRUE)),
+                                          as.character(id_data_carga + days((2 - wday(id_data_carga, week_start = 1)) %% 7)),
+                                          dia_descarga),
+                   data_descarga = ifelse(str_detect(data_descarga, "^\\d{2}$"), 
+                                          paste0("2024-08-",data_descarga),
+                                          data_descarga),
+                   
+                   # Separar a hora inicial
+                   hora1 = str_extract(d_hora_descarga, "(?<=as|AS|-)\\s*\\d{1,2}[:hH]?\\d{0,2}"),
+                   # Verificar se existe o símbolo ">" e separar a hora final
+                   hora2 = ifelse(str_detect(d_hora_descarga, ">"),
+                                  str_trim(str_split_fixed(d_hora_descarga, ">", 2)[,2]),NA),
+                   hora2 = ifelse(str_detect(hora1, "13H"), 13, hora2),
+                   hora_descarga = ifelse(is.na(hora2), hora1, hora2),
+                   hora_descarga = ifelse(str_detect(hora_descarga, "[0-9]{1,2}"), 
+                                          paste0(hora_descarga, ":00"),
+                                          hora_descarga),
+                   troc_h_descarga = ifelse(str_detect(`DIA E HORA DESC`, " > |\\?"), 1, 0)) |>
+  
+            mutate(PRIORIDADE = ifelse(str_detect(PESO, "Vasilhames|vasilhame"), "TE02", PRIORIDADE),
+                   PRIORIDADE = ifelse(str_detect(PRIORIDADE, " as |\\/|Adicional|EXTRA|Extra|urgente|URGENTE|adicional|
+                                                  |\\?|SAI|ok|NA|avisado|spot|KA|OK|Sim|fixo|DESC|desc|ded|DED|Ded|RET|
+                                                  |Agendado|emitir|Plano|vanderleia|Vanderleia|Spot|CROSS|0.375"),
+                                       "agenda", PRIORIDADE),
+                   PRIORIDADE = ifelse(is.na(PRIORIDADE), "agenda", PRIORIDADE),
+                   PRIORIDADE = ifelse(!is.na(as.numeric(PRIORIDADE)) & as.numeric(PRIORIDADE) > 10, "agenda", PRIORIDADE),
+                   PRIORIDADE = ifelse(str_detect(PRIORIDADE, "PRIORIDADE"), 1, PRIORIDADE),
+                   PRIORIDADE = ifelse(str_detect(PRIORIDADE, "Corte|CORTE|CANCELADA"), 0, PRIORIDADE),
+                   PRIORIDADE = ifelse(str_detect(PRIORIDADE, "24H|24h"), 1, PRIORIDADE),
+                   PRIORIDADE = ifelse(str_detect(PRIORIDADE, "48H|48h"), 1, PRIORIDADE),
+                   PRIORIDADE = as.factor(PRIORIDADE))                                       |>
+            mutate(`DIA E HORA DESC` = ifelse(str_detect(`DIA E HORA DESC`, 
+                                                         "^\\d{1,2} as \\d{1,2}( > \\d{1,2})?$"),
+                                              `DIA E HORA DESC`,
+                                              "sem hora"),
+                   `DIA E HORA DESC` = ifelse(is.na(`DIA E HORA DESC`),
+                                              "sem hora", 
+                                              `DIA E HORA DESC`))                            |>
+            mutate(PLACA = PLACA |>
+                     str_replace_all("[\\r\\n]", "")   |> # Remover quebras de linha
+                     str_trim()                        |> # Remover espaços em branco nas extremidades
+                     str_replace(".*>\\s*", "")        |> # Manter apenas a parte após ">"
+                     str_replace("\\s*-\\s*\\d+$", "")    # Remover sufixos "-N" no final
+                   )                                   |>
+            mutate(recusada  = ifelse(str_detect(PLACA, regex("SEM RECURSO", ignore_case = TRUE)),
+                                      1, recusada),
+                   cancelada = ifelse(str_detect(PLACA, regex("SEM RECURSO", ignore_case = TRUE)),
+                                      0, cancelada),
+                   PLACA     = ifelse(str_detect(PLACA, regex("SEM RECURSO", ignore_case = TRUE)),
+                                      "XXX", PLACA),
+                   MOTORISTA = ifelse(is.na(MOTORISTA), "sem nome", MOTORISTA),
+                   id_PLACA  = PLACA)                                                     |>
+    
+            mutate(id_MDFe = str_extract(CTE, "(?<=Mdf-e\\s)\\d+"), .keep = "unused")     |>
+  
+            select(UNID, CLIENTE, ORIGEM, DESTINO, PALLETS, PESO, PRIORIDADE,
+                   id_PLACA, id_data_carga, id_MDFe, hora_carga, data_descarga, hora_descarga, 
+                   troca_ordem, troc_h_carga, troc_h_descarga, troc_recurso,
+                   cancelada, recusada, recurso_extra, cliente_monitora, isca, retorno) |>
+  
+            mutate(hora_carga       = ifelse(is.na(hora_carga), "livre", hora_carga),
+                   id_data_descarga = ifelse(is.na(data_descarga), "livre", data_descarga),
+                   hora_descarga    = ifelse(is.na(hora_descarga), "livre", hora_descarga),
+                   possui_prioridade = as.factor(ifelse(str_detect(PRIORIDADE, "agenda|0|TE01|TE02"), 0, 1)),
+                   troca_ordem      = as.factor(ifelse(is.na(troca_ordem), 0, troca_ordem)),
+                   troc_h_carga     = as.factor(troc_h_carga),
+                   troc_h_descarga  = as.factor(ifelse(is.na(troc_h_descarga), 0, troc_h_descarga)),
+                   troc_recurso     = as.factor(ifelse(is.na(troc_recurso), 0, troc_recurso)),
+                   cancelada        = as.factor(ifelse(is.na(cancelada), 0, cancelada)),
+                   recusada         = as.factor(ifelse(is.na(recusada), 0, recusada)),
+                   recurso_extra    = as.factor(ifelse(is.na(recurso_extra), 0, recurso_extra)),
+                   cliente_monitora = as.factor(ifelse(is.na(cliente_monitora), 0, cliente_monitora)),
+                   isca             = as.factor(isca),
+                   retorno          = as.factor(ifelse(is.na(retorno), 0, retorno))) |>
+          select(-c(data_descarga))
+
+remove(agenda, converter_horas, processar_horas)
+```
+
+```{r}
+tibble(Ncanc = as.numeric(table(agenda.1$cancelada)),
+       Pcanc = as.numeric(prop.table(table(agenda.1$cancelada))*100),
+       Nrecu = as.numeric(table(agenda.1$recusada)),
+       Precu = as.numeric(prop.table(table(agenda.1$recusada))*100)) 
+
+
+agenda.2 = agenda.1 |>
+           filter(cancelada == 0 & recusada == 0) |>
+           select(-c(PRIORIDADE, cancelada, recusada))
+
+remove(agenda.1)
+```
+
+# bd trafegus
+
+```{r}
+
+trafegus1 = read.csv("b. base de dados/trafegus.csv", stringsAsFactors = FALSE)                         |>
+           #filter(viag_data_inicio > "2024-07-31 23:59:59" & viag_data_inicio < "2024-09-01 00:00:00") |>
+           filter(str_detect(nome_transportador, "GHELERE"))                                            |>
+           #mutate(row_id = row_number())                                                               |>
+           select(-c(X, matriz_emba_nome, emba_nome, viag_usuario_adicionou, viag_usuario_adicionou,
+                     pess_oras_codigo_transportador, documento_seguradora, quantidade_posicao_manual,
+                     embarcador_telefone, cnpj_gr, viag_codigo_externo, operacao, codigoSM, viagemId,
+                     documento_transportador, cnpj_emba, cnpj_emba_matriz, ajudantes, tope_descricao,
+                     tipo_operacao, viag_pgpg_codigo, viag_numero_manifesto, 
+                     viag_valor_merc_especifica, viag_valor_merc_nao_especifica, viag_valor_ddr,
+                     viag_total_eixos, viag_codigo_pai, temperatura, viag_descricao_carga,
+                     viag_centro_custo, viag_unidade_pagadora, viag_observacao, distancia_restante,
+                     percentual_viagem, previsao_fim_recalculada, viag_justificativa_liberacao,
+                     viag_redundante, campos_adicionais_viagem, link_mapa_veiculo_viagem,
+                     regioes_urbanas, status_aceite, CTRC, cliente, historico_status))
+
+trafegus2 = read.csv("b. base de dados/trafegus2.csv", sep = ";", stringsAsFactors = FALSE)            |>
+           #filter(viag_data_inicio > "2024-07-31 23:59:59" & viag_data_inicio < "2024-09-01 00:00:00") |>
+           filter(str_detect(nome_transportador, "GHELERE"))                                           |>
+           #mutate(row_id = row_number())                                                               |>
+           select(-c(matriz_emba_nome, emba_nome, viag_usuario_adicionou, viag_usuario_adicionou,
+                     pess_oras_codigo_transportador, documento_seguradora, quantidade_posicao_manual,
+                     embarcador_telefone, cnpj_gr, viag_codigo_externo, operacao, codigoSM, viagemId,
+                     documento_transportador, cnpj_emba, cnpj_emba_matriz, ajudantes, tope_descricao,
+                     tipo_operacao, viag_pgpg_codigo, viag_numero_manifesto, 
+                     viag_valor_merc_especifica, viag_valor_merc_nao_especifica, viag_valor_ddr,
+                     viag_total_eixos, viag_codigo_pai, temperatura, viag_descricao_carga,
+                     viag_centro_custo, viag_unidade_pagadora, viag_observacao, distancia_restante,
+                     percentual_viagem, previsao_fim_recalculada, viag_justificativa_liberacao,
+                     viag_redundante, campos_adicionais_viagem, link_mapa_veiculo_viagem,
+                     regioes_urbanas, status_aceite, CTRC, cliente, historico_status))
+
+trafegus = rbind(trafegus1, trafegus2)                  |>
+           distinct(viag_data_inicio, .keep_all = TRUE) |>
+           mutate(row_id = row_number())
+
+remove(trafegus1, trafegus2)
+
+#t.veic = fromJSON(trafegus[1,26])
+#t.moto = fromJSON(trafegus[1,11])
+#t.term = fromJSON(trafegus[1,29])
+#t.orig = fromJSON(trafegus[1,62])
+
+fature.veiculo = trafegus                                              |>
+                 mutate(veiculos = str_replace_all(veiculos, "\\\\'", "\""),
+                        veiculos = str_replace(veiculos, "\'", ""),
+                        veiculos = str_replace(veiculos, "'$", ""))    |>
+                 mutate(veiculo_parsed = map(veiculos, ~ fromJSON(.))) |>
+                 select(row_id, veiculo_parsed)                        |>
+                 unnest_longer(veiculo_parsed)                         |>
+                 unnest_wider(veiculo_parsed)
+
+fature.cavalo = fature.veiculo            |>
+                filter(tipo_veiculo == 2) |>
+                select(row_id, placa_cavalo = placa, marca_cavalo = marca, modelo_cavalo = modelo,
+                       ano_modelo_cavalo = ano_modelo, ano_fabricacao_cavalo = ano_fabricacao,
+                       eras_codigo, eras_descricao)
+
+fature.carreta = fature.veiculo            |>
+                 filter(tipo_veiculo == 1) |>
+                 select(row_id, placa_carreta = placa, marca_carreta = marca, modelo_carreta = modelo,
+                        ano_modelo_carreta = ano_modelo, ano_fabricacao_carreta = ano_fabricacao)
+
+trafegus.1 = trafegus                                |>
+             left_join(fature.cavalo, by = 'row_id') |>
+             left_join(fature.carreta, by = 'row_id')|>
+             select(-veiculos)
+
+remove(fature.carreta, fature.cavalo, fature.veiculo, trafegus)
+
+fature.motorista = trafegus.1                                                |>
+                   mutate(motoristas = str_replace_all(motoristas, "\\\\'", "\""),
+                          motoristas = str_replace(motoristas, "\'", ""),
+                          motoristas = str_replace(motoristas, "'$", ""))    |>
+                   mutate(motorista_parsed = map(motoristas, ~ fromJSON(.))) |>
+                   select(row_id, motorista_parsed)                          |>
+                   unnest_longer(motorista_parsed)                           |>
+                   unnest_wider(motorista_parsed)                            |>
+                   select(row_id, nome_moto, cpf_moto, vinculo_contratual)
+
+trafegus.2 = trafegus.1                                 |>
+             left_join(fature.motorista, by = 'row_id') |>
+             select(-c(motoristas, terminais))
+
+remove(fature.motorista, trafegus.1)
+
+#t.term = fromJSON(trafegus.2[1,11])
+#t.fret = fromJSON(trafegus.2[1,22])
+
+
+fature.frete = trafegus.2                                                        |>
+               mutate(valor_frete = str_replace_all(valor_frete, "\\\\'", "\""),
+                          valor_frete = str_replace(valor_frete, "\'", ""),
+                          valor_frete = str_replace(valor_frete, "'$", ""))      |>
+               mutate(frete_parsed = map(valor_frete, ~ fromJSON(.)))            |>
+               select(row_id, frete_parsed)                                      |>
+               unnest_longer(frete_parsed)                                       |>
+               unnest_wider(frete_parsed)                                        |>
+               select(row_id, viag_numero_manifesto, 
+                      viag_data_cadastro_manifesto = viag_data_cadastro,
+                      placa = veic_placa)
+
+trafegus.3 = trafegus.2                             |>
+             left_join(fature.frete, by = 'row_id') |>
+             select(-c(valor_frete, origem, destino, descricaoRota))
+
+remove(fature.frete, trafegus.2)
+
+#t.loca = fromJSON(trafegus.3[1,22])
+
+trafegus.4 = trafegus.3                                              |>
+             mutate(locais = str_replace_all(locais, "\\\\'", "\""),
+                    locais = str_replace(locais, "\'", ""),
+                    locais = str_replace(locais, "'$", ""))          |>
+             mutate(locais_parsed  = map(locais, ~ fromJSON(.)),
+                    numero_paradas = map_int(locais_parsed, ~ {
+                       if (is.null(.)) {
+                         0
+                         } else if (is.data.frame(.)) {
+                           nrow(.)
+                           } else {
+                             length(.)
+                             }
+                       }),
+                    numero_paradas_proibidas = map_int(locais_parsed, ~ {
+                     # Verificar se o elemento não é nulo e tem a coluna 'local_permitido'
+                      if (!is.null(.x) && "local_permitido" %in% names(.x)) {
+                        sum(.x$local_permitido == 'N', na.rm = TRUE)
+                        } else {
+                          0
+                          }
+                       }))                                      |>
+             select(-c(locais, locais_parsed))
+
+remove(trafegus.3)
+
+trafegus.5 = trafegus.4                                         |>
+             filter(!is.na(viag_numero_manifesto ) & 
+                    !is.na(placa_cavalo)           &
+                    !is.na(placa_carreta))                      |>
+             select(-c(pess_nome_transportador,
+                       nome_transportador, 
+                       data_primeira_posicao_viagem,
+                       viag_ttra_codigo, viag_carregado,
+                       viag_data_cadastro, roteirizar,
+                       row_id, eras_codigo, vinculo_contratual))|>
+  
+             mutate(NOME_EMBARCADOR = nome_embarcador, .keep = "unused", .before = 1)                      |>
+             mutate(OPERACAO = ifelse(str_detect(descricao_pgr, "AGREGADOS E TERCEIROS"),
+                                      "AGR ou TER", 
+                                      ifelse(str_detect(descricao_pgr, "SPOT"), 
+                                             "SPOT",
+                                             ifelse(str_detect(descricao_pgr, "DEDICADO HEINEKEN"),
+                                                    "DEDICADO",
+                                                    ifelse(str_detect(descricao_pgr, "CROSS"),
+                                                           "CROSS",
+                                                           ifelse(str_detect(descricao_pgr, "OPERACAO MINAS"),
+                                                                  "OP MINAS",
+                                                                  NA))))), 
+                    OPERACAO = as.factor(OPERACAO), .after = 2)                                            |>
+  
+              mutate(CIDADE_OPERACO = ifelse(str_detect(descricao_pgr, "AGREGADOS E TERCEIROS"),
+                                        "MGA", 
+                                        ifelse(str_detect(descricao_pgr, "CASCAVEL"), 
+                                               "CVL",
+                                               ifelse(str_detect(descricao_pgr, "PONTA GROSSA"),
+                                                      "PG",
+                                                      ifelse(str_detect(descricao_pgr, "MARINGA"),
+                                                             "MGA",
+                                                             ifelse(str_detect(descricao_pgr, "MARILIA"),
+                                                                    "MAR",
+                                                                    ifelse(str_detect(descricao_pgr, "CURITIBA"),
+                                                                    "CTA",
+                                                                    ifelse(str_detect(descricao_pgr, "CAMPO GRANDE"),
+                                                                    "CPG",
+                                                                    "BTM"))))))), 
+                     CIDADE_OPERACO = as.factor(CIDADE_OPERACO), .after = 2) |>
+  
+              mutate(GR_JORNADA = as.factor(ifelse(str_detect(descricao_pgr, "GR \\+ JORNADA"), 
+                                         1, 0)), .after = 2, .keep = "unused")                 |>
+              mutate(ROTA_CODIGO    = rota_codigo,
+                     ROTA_DESCRICAO = rota_descricao,
+                     rota_aprovada  = ifelse(str_detect(ROTA_DESCRICAO, "APM - |APM- |APM  -"), 1, 0),
+                     STATUS_VIAGEM  = status_viagem,
+                     VIAG_DATA_ALTERACO = as.POSIXct(viag_data_alteracao),
+                     TIPO_VIAGEM = as.factor(tipo_viagem),
+                     VIAG_VALOR_CARGA = viag_valor_carga,
+                     VIAG_PESO_TOTAL  = viag_peso_total,
+                     VIAG_DISTANCIA   = viag_distancia,
+                     VIAG_DATA_CADASTRO_MANIFESTO = as.POSIXct(viag_data_cadastro_manifesto),
+                     VIAG_DATA_INICIO = as.POSIXct(viag_data_inicio),
+                     VIAG_DATA_FIM    = as.POSIXct(ifelse(viag_data_fim == "",
+                                                          (viag_previsao_fim),
+                                                          (viag_data_fim))),
+                     VIAG_PREVISAO_INICIO = as.POSIXct(viag_previsao_inicio),
+                     VIAG_PREVISAO_FIM    = as.POSIXct(ifelse(viag_previsao_fim == "",
+                                                              (viag_data_fim),
+                                                              (viag_previsao_fim))), .keep = "unused")    |>
+  
+                mutate(delta_inicio_cadastro = as.numeric(difftime(VIAG_DATA_INICIO, VIAG_DATA_CADASTRO_MANIFESTO, 
+                                                        units = "hours")),
+                       delta_fim_inicio = as.numeric(difftime(VIAG_DATA_FIM, VIAG_DATA_INICIO, 
+                                                   units = "hours")),
+                       delta_pinicio_inicio = as.numeric(difftime(VIAG_DATA_INICIO, VIAG_PREVISAO_INICIO, 
+                                                   units = "hours")),
+                       delta_pfim_fim = as.numeric(difftime(VIAG_DATA_FIM, VIAG_PREVISAO_FIM, 
+                                                   units = "hours")))                                      |>
+  
+                mutate(ERAS_DESCRICAO = ifelse(str_detect(eras_descricao, "\\(NV\\) GR - ALTO RISCO"),
+                                      "ALTO", 
+                                      ifelse(str_detect(eras_descricao, "\\(NV\\) GR - FROTA"), 
+                                             "NV FROTA",
+                                             ifelse(str_detect(eras_descricao, "\\(NV\\) GR ESPORADICO, SIDER"),
+                                                    "SIDER",
+                                                    ifelse(str_detect(eras_descricao, "\\(NIV\\) GR - FROTA"),
+                                                           "NIV FROTA",
+                                                           NA)))), 
+                       ERAS_DESCRICAO = as.factor(ERAS_DESCRICAO),
+                       IDADE_CAVALO   = 2024-as.numeric(ano_fabricacao_cavalo),
+                       IDADE_CARRETA  = 2024-as.numeric(ano_fabricacao_carreta),
+                       MARCA_CAVALO   = as.factor(marca_cavalo),
+                       MARCA_CARRETA  = as.factor(marca_carreta),
+                       .keep = "unused", .after = 4)                                                      |>
+                mutate(id_data_carga = as.Date(VIAG_DATA_INICIO),
+                       id_PLACA = placa,
+                       id_MDFe  = viag_numero_manifesto, .keep = "unused", .after = 4)                    |>
+                select(-c(placa_cavalo, placa_carreta, modelo_cavalo, ano_modelo_cavalo,
+                          modelo_carreta, ano_modelo_carreta,))
+              
+
+remove(trafegus.4)
+
+
+# Função para extrair cidade e estado antes do X
+extrair_antes_do_X = function(string) {
+  # Dividir a string no "X"
+  partes = str_split(string, " X ", simplify = TRUE)
+  # Usar regex para extrair cidade e estado da parte antes do "X"
+  str_extract(partes[,1], "[A-Z ]+ / [A-Z]{2}$|[A-Z ]+/[A-Z]{2}$|[A-Z]+/ [A-Z]{2}$")
+}
+
+# Função para extrair cidade e estado depois do X
+extrair_depois_do_X = function(string) {
+  # Dividir a string no "X"
+  partes = str_split(string, " X ", simplify = TRUE)
+  # Usar regex para extrair cidade e estado da parte depois do "X"
+  str_extract(partes[,2], "[A-Z ]+ / [A-Z]{2}$|[A-Z ]+/[A-Z]{2}$|[A-Z]+/ [A-Z]{2}$|
+                          |\\b[A-Z ]+ / [A-Z]{2}\\b|\\b[A-Z ]+/ [A-Z]{2}\\b|\\b[A-Z ]+/[A-Z]{2}\\b")
+}
+
+
+trafegus.6 = trafegus.5 |> 
+             mutate(cidade_estado_origem  = extrair_antes_do_X(ROTA_DESCRICAO),
+                    cidade_estado_origem  = str_remove(cidade_estado_origem, "^HNK\\s+"),
+                    cidade_estado_origem  = str_remove(cidade_estado_origem, "^ SPAL INDUSTRIA\\s+"),
+                    cidade_estado_origem  = str_remove(cidade_estado_origem, "^BRASILEIRA\\s+"),
+                    cidade_estado_origem  = str_remove(cidade_estado_origem, "^ SPAL IND\\s+"),
+                    cidade_estado_origem  = str_remove(cidade_estado_origem, "^ SPAL\\s+"),
+                    cidade_estado_origem  = str_remove(cidade_estado_origem, "^\\s+"),
+                    
+                    cidade_estado_destino = extrair_depois_do_X(ROTA_DESCRICAO),
+                    cidade_estado_destino = ifelse(str_detect(cidade_estado_destino, "PR \\/ PO|PR \\/ CP"),
+                                                   "CURITIBA / PR",
+                                                   cidade_estado_destino),
+                    cidade_estado_destino = ifelse(str_detect(cidade_estado_destino, "AM/PM"),
+                                                   "CAJAMAR / SP",
+                                                   cidade_estado_destino),
+                    cidade_estado_destino = ifelse(str_detect(cidade_estado_destino, "A BETIM/ MG"),
+                                                   "BETIM/ MG",
+                                                   cidade_estado_destino),
+                    cidade_estado_destino  = str_remove(cidade_estado_destino, "^INDUSTRIA E COMERCIO\\s+"),
+                    cidade_estado_destino  = str_remove(cidade_estado_destino, "^HNK\\s+"),
+                    cidade_estado_destino  = str_remove(cidade_estado_destino, "^HEINKEN\\s+"),
+                    cidade_estado_destino  = str_remove(cidade_estado_destino, "^\\s+"),
+                    
+                    .after = 18)
+
+#trafegus.6[6043,19] = "MARECHAL CANDIDO RONDON / PR"
+#trafegus.6[2320,19] = "PONTA GROSSA / PR"
+#trafegus.6[3478,19] = "BETIM / MG"
+#trafegus.6[2482,19] = "AGUA CLARA / MS"
+
+#trafegus.6[195,20] = "PORTO ALEGRE / RS"
+#trafegus.6[3478,20] = "ARAUCARIA / PR "
+#trafegus.6[3728,20] = "ROLANDIA / PR"
+#trafegus.6[4271,20] = "ROLANDIA / PR"
+
+#trafegus.6[4594,20] = "SAO JOSE DOS PINHAIS / PR"
+#trafegus.6[4672,20] = "SAO JOSE DOS PINHAIS / PR"
+#trafegus.6[5051,20] = "SAO JOSE DOS PINHAIS / PR"
+#trafegus.6[5053,20] = "SAO JOSE DOS PINHAIS / PR"
+#trafegus.6[5267,20] = "SAO JOSE DOS PINHAIS / PR"
+#trafegus.6[6218,20] = "SAO JOSE DOS PINHAIS / PR"
+#trafegus.6[6283,20] = "SAO JOSE DOS PINHAIS / PR"
+
+
+remove(trafegus.5, extrair_antes_do_X, extrair_depois_do_X)
+
+trafegus.7 = trafegus.6 |>
+             separate(cidade_estado_origem, into = c("cidade_origem", "estado_origem"), sep = "/")    |>
+             separate(cidade_estado_destino, into = c("cidade_destino", "estado_destino"), sep = "/") |>
+             mutate(estado_origem  = str_trim(estado_origem),
+                    cidade_origem  = str_trim(cidade_origem),
+                    estado_destino = str_trim(estado_destino),
+                    cidade_destino = str_trim(cidade_destino),
+                    intraestado    = ifelse(estado_origem == estado_destino, 1, 0),
+                    interestado    = ifelse(estado_origem != estado_destino, 1, 0),
+                    rota_agrupada  = paste(estado_origem, estado_destino, sep = "-"),
+                    .after = 18)                                                                       |>
+            select(-c(nome_moto, STATUS_VIAGEM, TIPO_VIAGEM))                                          |>
+            mutate(id_CPF_MOTO = cpf_moto)
+
+remove(trafegus.6)
+
+
+
+
+```
+
+# bd rastreador
+
+```{r}
+#rastreador = read.table("b. base de dados/macros2.txt", header = TRUE, sep = ";")
+rastreador = read.table("b. base de dados/macros2.txt", header = TRUE, sep = ";")    |>
+             select(event_datetime, id_PLACA = license_plate,
+                    driver_name, odmeter, macro_code,
+                    macro_description, )                                         |>
+             #filter(event_datetime > "2024-07-31 23:59:59" & 
+             #      event_datetime < "2024-09-01 00:00:00")                      |>
+             arrange(id_PLACA, event_datetime)                                   |>
+             mutate(id_data_carga = as.Date(event_datetime))                     |>
+             group_by(id_data_carga, id_PLACA)                                   |>
+             nest()                                                              |>
+             mutate(numero_acessos = map_int(data, ~n_distinct(.x$driver_name))) |>
+             ungroup()                                                           |>
+             mutate(row_id = row_number())
+
+# função para pegar multiplos eventos "iniciou a viagem" 
+get_event_inicio_viagem = function(df){
+  data_subset = df |>
+    filter(str_detect(macro_description,"\\bINICIO DE VIAGEM") & driver_name != "") |>
+    pull(event_datetime)
+  # se houver menos de 3 ocorrências, preencher com NA
+  while(length(data_subset) < 6){
+    data_subset = c(data_subset, NA)
+  }
+return(data_subset)
+}
+
+rastreador.2 = rastreador |>
+               mutate(inicio_viagem = map(data, get_event_inicio_viagem))                 |>
+               mutate(hora_inicio_viag_1  = map_chr(inicio_viagem, ~as.character(.x[1])),
+                      hora_inicio_viag_2  = map_chr(inicio_viagem, ~as.character(.x[2])),
+                      hora_inicio_viag_3  = map_chr(inicio_viagem, ~as.character(.x[3])),
+                      hora_inicio_viag_4  = map_chr(inicio_viagem, ~as.character(.x[4])),
+                      hora_inicio_viag_5  = map_chr(inicio_viagem, ~as.character(.x[5])),
+                      hora_inicio_viag_6  = map_chr(inicio_viagem, ~as.character(.x[6]))) |>
+               select(-inicio_viagem)
+
+remove(rastreador, get_event_inicio_viagem)
+
+# função para pegar multiplos eventos "chegou no cliente"
+get_event_chegada_cliente = function(df){
+  data_subset = df |>
+    filter(str_detect(macro_description,"CHEGADA NO CLIENTE") & driver_name != "") |>
+    pull(event_datetime)
+  # se houver menos de 3 ocorrências, preencher com NA
+  while(length(data_subset) < 6){
+    data_subset = c(data_subset, NA)
+  }
+return(data_subset)
+}
+
+rastreador.3 = rastreador.2 |>
+               mutate(chegada_no_cliente = map(data, get_event_chegada_cliente))                   |>
+               mutate(hora_chegada_cliente_1  = map_chr(chegada_no_cliente, ~as.character(.x[1])),
+                      hora_chegada_cliente_2  = map_chr(chegada_no_cliente, ~as.character(.x[2])),
+                      hora_chegada_cliente_3  = map_chr(chegada_no_cliente, ~as.character(.x[3])),
+                      hora_chegada_cliente_4  = map_chr(chegada_no_cliente, ~as.character(.x[4])),
+                      hora_chegada_cliente_5  = map_chr(chegada_no_cliente, ~as.character(.x[5])),
+                      hora_chegada_cliente_6  = map_chr(chegada_no_cliente, ~as.character(.x[6]))) |>
+              select(-chegada_no_cliente)
+
+remove(rastreador.2, get_event_chegada_cliente)
+
+# função para pegar multiplos eventos "inicio de carregamento" 
+get_event_inicio_carregamento = function(df){
+  data_subset = df |>
+    filter(str_detect(macro_description,"INICIO DE CARREGAMENTO") & driver_name != "") |>
+    pull(event_datetime)
+  # se houver menos de 3 ocorrências, preencher com NA
+  while(length(data_subset) < 6){
+    data_subset = c(data_subset, NA)
+  }
+return(data_subset)
+}
+
+rastreador.4 = rastreador.3 |>
+               mutate(inicio_do_carregamento = map(data, get_event_inicio_carregamento))             |>
+               mutate(hora_inicio_carreg_1  = map_chr(inicio_do_carregamento, ~as.character(.x[1])),
+                      hora_inicio_carreg_2  = map_chr(inicio_do_carregamento, ~as.character(.x[2])),
+                      hora_inicio_carreg_3  = map_chr(inicio_do_carregamento, ~as.character(.x[3])),
+                      hora_inicio_carreg_4  = map_chr(inicio_do_carregamento, ~as.character(.x[4])),
+                      hora_inicio_carreg_5  = map_chr(inicio_do_carregamento, ~as.character(.x[5])),
+                      hora_inicio_carreg_6  = map_chr(inicio_do_carregamento, ~as.character(.x[6]))) |>
+              select(-inicio_do_carregamento)
+
+remove(rastreador.3, get_event_inicio_carregamento)
+
+# função para pegar multiplos eventos "fim de carregamento" 
+get_event_fim_carregamento = function(df){
+  data_subset = df |>
+    filter(str_detect(macro_description,"FIM DE CARREGAMENTO") & driver_name != "") |>
+    pull(event_datetime)
+  # se houver menos de 3 ocorrências, preencher com NA
+  while(length(data_subset) < 6){
+    data_subset = c(data_subset, NA)
+  }
+return(data_subset)
+}
+
+rastreador.5 = rastreador.4 |>
+               mutate(fim_do_carregamento = map(data, get_event_fim_carregamento))             |>
+               mutate(hora_fim_carreg_1  = map_chr(fim_do_carregamento, ~as.character(.x[1])),
+                      hora_fim_carreg_2  = map_chr(fim_do_carregamento, ~as.character(.x[2])),
+                      hora_fim_carreg_3  = map_chr(fim_do_carregamento, ~as.character(.x[3])),
+                      hora_fim_carreg_4  = map_chr(fim_do_carregamento, ~as.character(.x[4])),
+                      hora_fim_carreg_5  = map_chr(fim_do_carregamento, ~as.character(.x[5])),
+                      hora_fim_carreg_6  = map_chr(fim_do_carregamento, ~as.character(.x[6]))) |>
+              select(-fim_do_carregamento)
+
+remove(rastreador.4, get_event_fim_carregamento)
+
+# função para pegar multiplos eventos "inicio de descarregamento" 
+get_event_inicio_descarrega = function(df){
+  data_subset = df |>
+    filter(str_detect(macro_description,"INICIO DE DESCARGA") & driver_name != "") |>
+    pull(event_datetime)
+  # se houver menos de 3 ocorrências, preencher com NA
+  while(length(data_subset) < 6){
+    data_subset = c(data_subset, NA)
+  }
+return(data_subset)
+}
+
+rastreador.6 = rastreador.5 |>
+               mutate(inicio_da_descarga = map(data, get_event_inicio_descarrega))       |>
+               mutate(hora_inicio_descarreg_1  = map_chr(inicio_da_descarga, ~as.character(.x[1])),
+                      hora_inicio_descarreg_2  = map_chr(inicio_da_descarga, ~as.character(.x[2])),
+                      hora_inicio_descarreg_3  = map_chr(inicio_da_descarga, ~as.character(.x[3])),
+                      hora_inicio_descarreg_4  = map_chr(inicio_da_descarga, ~as.character(.x[4])),
+                      hora_inicio_descarreg_5  = map_chr(inicio_da_descarga, ~as.character(.x[5])),
+                      hora_inicio_descarreg_6  = map_chr(inicio_da_descarga, ~as.character(.x[6]))) |>
+               select(-inicio_da_descarga)
+
+remove(rastreador.5, get_event_inicio_descarrega)
+
+# função para pegar multiplos eventos "fim de descarregamento" 
+get_event_fim_descarrega = function(df){
+  data_subset = df |>
+    filter(str_detect(macro_description,"FIM DE DESCARGA") & driver_name != "") |>
+    pull(event_datetime)
+  # se houver menos de 3 ocorrências, preencher com NA
+  while(length(data_subset) < 6){
+    data_subset = c(data_subset, NA)
+  }
+return(data_subset)
+}
+
+rastreador.7 = rastreador.6 |>
+               mutate(fim_da_descarga = map(data, get_event_fim_descarrega))       |>
+               mutate(hora_fim_descarreg_1  = map_chr(fim_da_descarga, ~as.character(.x[1])),
+                      hora_fim_descarreg_2  = map_chr(fim_da_descarga, ~as.character(.x[2])),
+                      hora_fim_descarreg_3  = map_chr(fim_da_descarga, ~as.character(.x[3])),
+                      hora_fim_descarreg_4  = map_chr(fim_da_descarga, ~as.character(.x[4])),
+                      hora_fim_descarreg_5  = map_chr(fim_da_descarga, ~as.character(.x[5])),
+                      hora_fim_descarreg_6  = map_chr(fim_da_descarga, ~as.character(.x[6]))) |>
+               select(-fim_da_descarga)
+
+remove(rastreador.6, get_event_fim_descarrega)
+
+# função para pegar multiplos eventos "fim de viagem" 
+get_event_fim_viagem = function(df){
+  data_subset = df |>
+    filter(str_detect(macro_description,"FIM DE VIAGEM") & driver_name != "") |>
+    pull(event_datetime)
+  # se houver menos de 3 ocorrências, preencher com NA
+  while(length(data_subset) < 6){
+    data_subset = c(data_subset, NA)
+  }
+return(data_subset)
+}
+
+rastreador.8 = rastreador.7 |>
+               mutate(fim_de_viagem = map(data, get_event_fim_viagem))       |>
+               mutate(hora_fim_viagem_1  = map_chr(fim_de_viagem, ~as.character(.x[1])),
+                      hora_fim_viagem_2  = map_chr(fim_de_viagem, ~as.character(.x[2])),
+                      hora_fim_viagem_3  = map_chr(fim_de_viagem, ~as.character(.x[3])),
+                      hora_fim_viagem_4  = map_chr(fim_de_viagem, ~as.character(.x[4])),
+                      hora_fim_viagem_5  = map_chr(fim_de_viagem, ~as.character(.x[5])),
+                      hora_fim_viagem_6  = map_chr(fim_de_viagem, ~as.character(.x[6]))) |>
+               select(-fim_de_viagem)
+
+remove(rastreador.7, get_event_fim_viagem)
+
+
+# outras contagens
+rastreador.9 = rastreador.8 |>
+               mutate(numero_de_macros    = unlist(map(data, nrow)),
+                      numero_manutencao   = map_int(data, ~ sum(
+                        str_detect(.x$macro_description, "MANUTENCAO"), na.rm = TRUE)),
+                      numero_paradas      = map_int(data, ~ sum(
+                        str_detect(.x$macro_description, "PARADA"), na.rm = TRUE)),
+                      ultimo_odometro_dia = map_dbl(data, ~ tail(.x$odmeter, n = 1))) |>
+               rowwise() |>
+               mutate(parado_ou_viagem = if (all(is.na(c_across(6:26)))) "parado" else "viajou") |>
+               ungroup()
+
+remove(rastreador.8)
+
+# deltas de tempo
+rastreador.10 = rastreador.9 |>
+                mutate(across(6:26, ymd_hms)) |>
+                mutate(delta_iniciar_carregamento_1 = difftime(hora_inicio_carreg_1, 
+                                                               hora_chegada_cliente_1, 
+                                                               units = "hours"),
+                       delta_iniciar_carregamento_2 = difftime(hora_inicio_carreg_2, 
+                                                               hora_chegada_cliente_2, 
+                                                               units = "hours"),
+                       delta_iniciar_carregamento_3 = difftime(hora_inicio_carreg_3, 
+                                                               hora_chegada_cliente_3, 
+                                                               units = "hours"),
+                       delta_iniciar_carregamento_4 = difftime(hora_inicio_carreg_4, 
+                                                               hora_chegada_cliente_4, 
+                                                               units = "hours"),
+                       delta_iniciar_carregamento_5 = difftime(hora_inicio_carreg_5, 
+                                                               hora_chegada_cliente_5, 
+                                                               units = "hours"),
+                       delta_iniciar_carregamento_6 = difftime(hora_inicio_carreg_6, 
+                                                               hora_chegada_cliente_6, 
+                                                               units = "hours"),
+                       
+                       delta_iniciar_carregamento_1 = ifelse(delta_iniciar_carregamento_1 < 0, 
+                                                             NA, 
+                                                             delta_iniciar_carregamento_1),
+                       delta_iniciar_carregamento_2 = ifelse(delta_iniciar_carregamento_2 < 0,
+                                                             NA,
+                                                             delta_iniciar_carregamento_2),
+                       delta_iniciar_carregamento_3 = ifelse(delta_iniciar_carregamento_3 < 0,
+                                                             NA, 
+                                                             delta_iniciar_carregamento_3),
+                       delta_iniciar_carregamento_4 = ifelse(delta_iniciar_carregamento_4 < 0,
+                                                             NA, 
+                                                             delta_iniciar_carregamento_4),
+                       delta_iniciar_carregamento_5 = ifelse(delta_iniciar_carregamento_5 < 0,
+                                                             NA, 
+                                                             delta_iniciar_carregamento_5),
+                       delta_iniciar_carregamento_6 = ifelse(delta_iniciar_carregamento_6 < 0,
+                                                             NA, 
+                                                             delta_iniciar_carregamento_6),
+                       
+                       delta_iniciar_descarregamento_1 = difftime(hora_inicio_descarreg_1, 
+                                                                  hora_chegada_cliente_1, 
+                                                                  units = "hours"),
+                       delta_iniciar_descarregamento_2 = difftime(hora_inicio_descarreg_2,
+                                                                  hora_chegada_cliente_2, 
+                                                                  units = "hours"),
+                       delta_iniciar_descarregamento_3 = difftime(hora_inicio_descarreg_3, 
+                                                                  hora_chegada_cliente_3, 
+                                                                  units = "hours"),
+                       delta_iniciar_descarregamento_4 = difftime(hora_inicio_descarreg_4, 
+                                                                  hora_chegada_cliente_4, 
+                                                                  units = "hours"),
+                       delta_iniciar_descarregamento_5 = difftime(hora_inicio_descarreg_5, 
+                                                                  hora_chegada_cliente_5, 
+                                                                  units = "hours"),
+                       delta_iniciar_descarregamento_6 = difftime(hora_inicio_descarreg_6, 
+                                                                  hora_chegada_cliente_6, 
+                                                                  units = "hours"),
+                       
+                       delta_iniciar_descarregamento_1 = ifelse(delta_iniciar_descarregamento_1 < 0,
+                                                                NA,
+                                                                delta_iniciar_descarregamento_1),
+                       delta_iniciar_descarregamento_2 = ifelse(delta_iniciar_descarregamento_2 < 0,
+                                                                NA, 
+                                                                delta_iniciar_descarregamento_2),
+                       delta_iniciar_descarregamento_3 = ifelse(delta_iniciar_descarregamento_3 < 0,
+                                                                NA,
+                                                                delta_iniciar_descarregamento_3),
+                       delta_iniciar_descarregamento_4 = ifelse(delta_iniciar_descarregamento_4 < 0,
+                                                                NA,
+                                                                delta_iniciar_descarregamento_4),
+                       delta_iniciar_descarregamento_5 = ifelse(delta_iniciar_descarregamento_5 < 0,
+                                                                NA,
+                                                                delta_iniciar_descarregamento_5),
+                       delta_iniciar_descarregamento_6 = ifelse(delta_iniciar_descarregamento_6 < 0,
+                                                                NA,
+                                                                delta_iniciar_descarregamento_6),
+                       
+                       delta_carregamento_1 = difftime(hora_fim_carreg_1, 
+                                                       hora_inicio_carreg_1, 
+                                                       units = "hours"),
+                       delta_carregamento_2 = difftime(hora_fim_carreg_2, 
+                                                       hora_inicio_carreg_2, 
+                                                       units = "hours"),
+                       delta_carregamento_3 = difftime(hora_fim_carreg_3, 
+                                                       hora_inicio_carreg_3,
+                                                       units = "hours"),
+                       delta_carregamento_4 = difftime(hora_fim_carreg_4, 
+                                                       hora_inicio_carreg_4,
+                                                       units = "hours"),
+                       delta_carregamento_5 = difftime(hora_fim_carreg_5, 
+                                                       hora_inicio_carreg_5,
+                                                       units = "hours"),
+                       delta_carregamento_6 = difftime(hora_fim_carreg_6, 
+                                                       hora_inicio_carreg_6,
+                                                       units = "hours"),
+                       
+                       delta_carregamento_1 = ifelse(delta_carregamento_1 < 0, 
+                                                     NA, 
+                                                     delta_carregamento_1),
+                       delta_carregamento_2 = ifelse(delta_carregamento_2 < 0,
+                                                     NA, 
+                                                     delta_carregamento_2),
+                       delta_carregamento_3 = ifelse(delta_carregamento_3 < 0, 
+                                                     NA, 
+                                                     delta_carregamento_3),
+                       delta_carregamento_4 = ifelse(delta_carregamento_4 < 0, 
+                                                     NA, 
+                                                     delta_carregamento_4),
+                       delta_carregamento_5 = ifelse(delta_carregamento_5 < 0, 
+                                                     NA, 
+                                                     delta_carregamento_5),
+                       delta_carregamento_6 = ifelse(delta_carregamento_6 < 0, 
+                                                     NA, 
+                                                     delta_carregamento_6),
+                       
+                       delta_descarregamento_1 = difftime(hora_fim_carreg_1, 
+                                                          hora_inicio_descarreg_1,
+                                                          units = "hours"),
+                       delta_descarregamento_2 = difftime(hora_fim_carreg_2, 
+                                                          hora_inicio_descarreg_2, 
+                                                          units = "hours"),
+                       delta_descarregamento_3 = difftime(hora_fim_carreg_3, 
+                                                          hora_inicio_descarreg_3,
+                                                          units = "hours"),
+                       delta_descarregamento_4 = difftime(hora_fim_carreg_4, 
+                                                          hora_inicio_descarreg_4,
+                                                          units = "hours"),
+                       delta_descarregamento_5 = difftime(hora_fim_carreg_5, 
+                                                          hora_inicio_descarreg_5,
+                                                          units = "hours"),
+                       delta_descarregamento_6 = difftime(hora_fim_carreg_6, 
+                                                          hora_inicio_descarreg_6,
+                                                          units = "hours"),
+                       
+                       delta_descarregamento_1 = ifelse(delta_descarregamento_1 < 0,
+                                                        NA, 
+                                                        delta_descarregamento_1),
+                       delta_descarregamento_2 = ifelse(delta_descarregamento_2 < 0, 
+                                                        NA,
+                                                        delta_descarregamento_2),
+                       delta_descarregamento_3 = ifelse(delta_descarregamento_3 < 0, 
+                                                        NA, 
+                                                        delta_descarregamento_3),
+                       delta_descarregamento_3 = ifelse(delta_descarregamento_4 < 0, 
+                                                        NA, 
+                                                        delta_descarregamento_4),
+                       delta_descarregamento_3 = ifelse(delta_descarregamento_5 < 0, 
+                                                        NA, 
+                                                        delta_descarregamento_5),
+                       delta_descarregamento_3 = ifelse(delta_descarregamento_6 < 0, 
+                                                        NA, 
+                                                        delta_descarregamento_6)) |>
+                select(-c(data, row_id))
+
+
+remove(rastreador.9)
+
+#rastreador.11 = rastreador.10 |>
+#                pivot_longer(cols = starts_with("hora_chegada"),
+#                             values_to = "hora_chegada")
+```
+
+# bds joins
+
+```{r}
+df.1 = agenda.2 |>
+       left_join(rastreador.10, by = c("id_data_carga", "id_PLACA")) |>
+       left_join(trafegus.7, by = c("id_MDFe"), relationship = "many-to-many")
+        
+df.2 = df.1 |>
+       select(-c(UNID,      # substituir por CIDADE_OPERACO (mais completa)
+                 ORIGEM,    # substituir por rota_agrupada (redução de níveis)
+                 DESTINO,   # substituir por rota_agrupada (redução de níveis)
+                 PESO,      # substituir por VIAG_PESO_TOTAL (mais confiável, informação dos documentos fiscais)
+                 #id_PLACA,  # foi necessária para realizar os joins
+                 id_MDFe, # foi necessária para realizar os joins
+                 NOME_EMBARCADOR, # não utilizar (possui muito níveis)
+                 ROTA_CODIGO,     # ajudou a construir a rota_agrupada (redução de níveis)
+                 ROTA_DESCRICAO,  # ajudou a construir a rota_agrupada (redução de níveis)
+                 cidade_origem,   # ajudou a construir a rota_agrupada (redução de níveis)
+                 estado_origem,   # ajudou a construir a rota_agrupada (redução de níveis)
+                 cidade_destino,  # ajudou a construir a rota_agrupada (redução de níveis)
+                 estado_destino,  # ajudou a construir a rota_agrupada (redução de níveis)
+                 VIAG_DATA_ALTERACO,   # não utilizar (sem objetivo prático)
+                 VIAG_DATA_CADASTRO_MANIFESTO, # ajudou a construir a delta_inicio_cadastro (eliminando uma POSIXct)
+                 VIAG_DATA_FIM,        # ajudou a construir a delta_fim_inicio (eliminando uma POSIXct)
+                 VIAG_PREVISAO_INICIO, # ajudou a construir a delta_pinicio_inicio (eliminando uma POSIXct)
+                 VIAG_PREVISAO_FIM,    # ajudou a construir a delta_pfim_fim (eliminando uma POSIXct)
+                 
+                 ))
+
+remove(df.1)
+
+
+df.3 = df.2 |>
+       mutate(hora_carga    = str_trim(hora_carga),
+              hora_descarga = str_trim(hora_descarga)) |>
+              
+       mutate(hora_carga_agenda    = as.POSIXct(paste(as.Date(id_data_carga.x), hora_carga), format = "%Y-%m-%d %H:%M", tz = "UTC"),
+              hora_descarga_agenda = as.POSIXct(paste(as.Date(id_data_descarga), hora_descarga), format = "%Y-%m-%d %H:%M", tz = "UTC"),
+              
+              hora_chegada_cliente_1 = as.POSIXct(hora_chegada_cliente_1, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+              hora_chegada_cliente_2 = as.POSIXct(hora_chegada_cliente_2, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+              hora_chegada_cliente_3 = as.POSIXct(hora_chegada_cliente_3, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+              hora_chegada_cliente_4 = as.POSIXct(hora_chegada_cliente_4, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+              hora_chegada_cliente_5 = as.POSIXct(hora_chegada_cliente_5, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+              hora_chegada_cliente_6 = as.POSIXct(hora_chegada_cliente_6, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+              
+              hora_inicio_carreg_1 = as.POSIXct(hora_inicio_carreg_1, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+              hora_inicio_carreg_2 = as.POSIXct(hora_inicio_carreg_2, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+              hora_inicio_carreg_3 = as.POSIXct(hora_inicio_carreg_3, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+              hora_inicio_carreg_4 = as.POSIXct(hora_inicio_carreg_4, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+              hora_inicio_carreg_5 = as.POSIXct(hora_inicio_carreg_5, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+              hora_inicio_carreg_6 = as.POSIXct(hora_inicio_carreg_6, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+              
+              hora_fim_carreg_1 = as.POSIXct(hora_fim_carreg_1, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+              hora_fim_carreg_2 = as.POSIXct(hora_fim_carreg_2, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+              hora_fim_carreg_3 = as.POSIXct(hora_fim_carreg_3, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+              hora_fim_carreg_4 = as.POSIXct(hora_fim_carreg_4, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+              hora_fim_carreg_5 = as.POSIXct(hora_fim_carreg_5, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+              hora_fim_carreg_6 = as.POSIXct(hora_fim_carreg_6, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+              
+              hora_inicio_descarreg_1 = as.POSIXct(hora_inicio_descarreg_1, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+              hora_inicio_descarreg_2 = as.POSIXct(hora_inicio_descarreg_2, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+              hora_inicio_descarreg_3 = as.POSIXct(hora_inicio_descarreg_3, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+              hora_inicio_descarreg_4 = as.POSIXct(hora_inicio_descarreg_4, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+              hora_inicio_descarreg_5 = as.POSIXct(hora_inicio_descarreg_5, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+              hora_inicio_descarreg_6 = as.POSIXct(hora_inicio_descarreg_6, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+              
+              hora_fim_descarreg_1 = as.POSIXct(hora_fim_descarreg_1, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+              hora_fim_descarreg_2 = as.POSIXct(hora_fim_descarreg_2, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+              hora_fim_descarreg_3 = as.POSIXct(hora_fim_descarreg_3, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+              hora_fim_descarreg_4 = as.POSIXct(hora_fim_descarreg_4, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+              hora_fim_descarreg_5 = as.POSIXct(hora_fim_descarreg_5, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+              hora_fim_descarreg_6 = as.POSIXct(hora_fim_descarreg_6, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+
+              .before = 1, .keep = "unused")           |>
+       select(id_PLACA.y,id_PLACA.x,
+              hora_carga_agenda, hora_chegada_cliente_1, 
+              hora_chegada_cliente_2, hora_chegada_cliente_3,
+              hora_chegada_cliente_4, hora_chegada_cliente_5,
+              hora_chegada_cliente_6,
+              hora_descarga_agenda, everything())      |>
+       select(-c(delta_iniciar_carregamento_1:delta_descarregamento_6))
+       
+remove(df.2)
+
+df.4 = df.3 |>
+       filter(!is.na(hora_chegada_cliente_1) & !is.na(hora_inicio_carreg_1))           |>
+       rowwise(hora_carga_agenda, hora_chegada_cliente_1, hora_chegada_cliente_2, 
+               hora_chegada_cliente_3, hora_chegada_cliente_4, hora_chegada_cliente_5,
+               hora_chegada_cliente_6)                                                 |>
+       mutate(menor_diferenca = min(
+         abs(difftime(hora_chegada_cliente_1, hora_carga_agenda, units = "secs")),
+         abs(difftime(hora_chegada_cliente_2, hora_carga_agenda, units = "secs")),
+         abs(difftime(hora_chegada_cliente_3, hora_carga_agenda, units = "secs")),
+         abs(difftime(hora_chegada_cliente_4, hora_carga_agenda, units = "secs")),
+         abs(difftime(hora_chegada_cliente_5, hora_carga_agenda, units = "secs")),
+         abs(difftime(hora_chegada_cliente_6, hora_carga_agenda, units = "secs")),
+         na.rm = TRUE),
+              hora_chegada_cliente = case_when(
+               abs(difftime(hora_chegada_cliente_1, hora_carga_agenda, units = "secs")) == menor_diferenca ~ hora_chegada_cliente_1,
+               abs(difftime(hora_chegada_cliente_2, hora_carga_agenda, units = "secs")) == menor_diferenca ~ hora_chegada_cliente_2,
+               abs(difftime(hora_chegada_cliente_3, hora_carga_agenda, units = "secs")) == menor_diferenca ~ hora_chegada_cliente_3,
+               abs(difftime(hora_chegada_cliente_4, hora_carga_agenda, units = "secs")) == menor_diferenca ~ hora_chegada_cliente_4,
+               abs(difftime(hora_chegada_cliente_5, hora_carga_agenda, units = "secs")) == menor_diferenca ~ hora_chegada_cliente_5,
+               abs(difftime(hora_chegada_cliente_6, hora_carga_agenda, units = "secs")) == menor_diferenca ~ hora_chegada_cliente_6),
+         .after = 3, .keep = "unused")                                                 |>
+       ungroup()                                                                       |>
+  
+       select(-c(menor_diferenca))                                                     |>
+       mutate(diferenca_agenda_chegada = (as.numeric(difftime(hora_chegada_cliente, hora_carga_agenda, units = "secs"))/60)/60, 
+              tranp_atrasou_carreg = as.factor(ifelse(diferenca_agenda_chegada > 1, 1, 0)), .after = 4)     |>
+  
+       rowwise(hora_carga_agenda, hora_inicio_carreg_1, hora_inicio_carreg_2, 
+               hora_inicio_carreg_3, hora_inicio_carreg_4, hora_inicio_carreg_5,
+               hora_inicio_carreg_6)                                                   |>
+       mutate(menor_diferenca = min(
+         abs(difftime(hora_inicio_carreg_1, hora_carga_agenda, units = "secs")),
+         abs(difftime(hora_inicio_carreg_2, hora_carga_agenda, units = "secs")),
+         abs(difftime(hora_inicio_carreg_3, hora_carga_agenda, units = "secs")),
+         abs(difftime(hora_inicio_carreg_4, hora_carga_agenda, units = "secs")),
+         abs(difftime(hora_inicio_carreg_5, hora_carga_agenda, units = "secs")),
+         abs(difftime(hora_inicio_carreg_6, hora_carga_agenda, units = "secs")),
+         na.rm = TRUE),
+              hora_inicio_carreg = case_when(
+               abs(difftime(hora_inicio_carreg_1, hora_carga_agenda, units = "secs")) == menor_diferenca ~ hora_inicio_carreg_1,
+               abs(difftime(hora_inicio_carreg_2, hora_carga_agenda, units = "secs")) == menor_diferenca ~ hora_inicio_carreg_2,
+               abs(difftime(hora_inicio_carreg_3, hora_carga_agenda, units = "secs")) == menor_diferenca ~ hora_inicio_carreg_3,
+               abs(difftime(hora_inicio_carreg_4, hora_carga_agenda, units = "secs")) == menor_diferenca ~ hora_inicio_carreg_4,
+               abs(difftime(hora_inicio_carreg_5, hora_carga_agenda, units = "secs")) == menor_diferenca ~ hora_inicio_carreg_5,
+               abs(difftime(hora_inicio_carreg_6, hora_carga_agenda, units = "secs")) == menor_diferenca ~ hora_inicio_carreg_6),
+         .after = 6, .keep = "unused")                                                 |>
+       ungroup()                                                                       |>
+  
+       select(-c(hora_inicio_carreg_1, hora_inicio_carreg_2, hora_inicio_carreg_3,
+                 hora_inicio_carreg_4, hora_inicio_carreg_5, hora_inicio_carreg_6,
+                 menor_diferenca))                                                     |>
+       mutate(diferenca_agenda_carreg = (as.numeric(difftime(hora_inicio_carreg, hora_carga_agenda, units = "secs"))/60)/60, 
+              cliente_atrasou_carreg = as.factor(ifelse(diferenca_agenda_carreg > 1, 1, 0)), .after = 7) |>
+  
+       rowwise(hora_inicio_carreg, hora_fim_carreg_1, hora_fim_carreg_2, 
+               hora_fim_carreg_3, hora_fim_carreg_4, hora_fim_carreg_5,
+               hora_fim_carreg_6)                                                      |>
+       mutate(menor_diferenca = min(
+         abs(difftime(hora_fim_carreg_1, hora_inicio_carreg, units = "secs")),
+         abs(difftime(hora_fim_carreg_2, hora_inicio_carreg, units = "secs")),
+         abs(difftime(hora_fim_carreg_3, hora_inicio_carreg, units = "secs")),
+         abs(difftime(hora_fim_carreg_4, hora_inicio_carreg, units = "secs")),
+         abs(difftime(hora_fim_carreg_5, hora_inicio_carreg, units = "secs")),
+         abs(difftime(hora_fim_carreg_6, hora_inicio_carreg, units = "secs")),
+         na.rm = TRUE),
+              hora_fim_carreg = case_when(
+               abs(difftime(hora_fim_carreg_1, hora_inicio_carreg, units = "secs")) == menor_diferenca ~ hora_fim_carreg_1,
+               abs(difftime(hora_fim_carreg_2, hora_inicio_carreg, units = "secs")) == menor_diferenca ~ hora_fim_carreg_2,
+               abs(difftime(hora_fim_carreg_3, hora_inicio_carreg, units = "secs")) == menor_diferenca ~ hora_fim_carreg_3,
+               abs(difftime(hora_fim_carreg_4, hora_inicio_carreg, units = "secs")) == menor_diferenca ~ hora_fim_carreg_4,
+               abs(difftime(hora_fim_carreg_5, hora_inicio_carreg, units = "secs")) == menor_diferenca ~ hora_fim_carreg_5,
+               abs(difftime(hora_fim_carreg_6, hora_inicio_carreg, units = "secs")) == menor_diferenca ~ hora_fim_carreg_6),
+         .after = 9, .keep = "unused")                                                 |>
+       ungroup()                                                                       |>
+  
+       select(-c(hora_fim_carreg_1, hora_fim_carreg_2, hora_fim_carreg_3,
+                 hora_fim_carreg_4, hora_fim_carreg_5, hora_fim_carreg_6,
+                 menor_diferenca))                                                     |>
+       mutate(delta_carregamento = (as.numeric(difftime(hora_fim_carreg, hora_inicio_carreg, units = "secs"))/60)/60,
+              .after = 10)                                                             |>
+  
+       filter(!is.na(hora_fim_carreg) & delta_carregamento > 0) |>
+       select(-c(hora_inicio_viag_1:hora_inicio_viag_6,
+                 hora_fim_viagem_1:hora_fim_viagem_6,
+                 id_data_carga.y))
+       
+         
+df.5 = df.4 |>
+       select(-c(id_PLACA.y, id_PLACA.x, hora_carga_agenda)) |>
+       select(hora_descarga_agenda, everything())            |>
+       #select(-c(hora_inicio_viag_1:hora_fim_carreg_6, hora_fim_viagem_1:hora_fim_viagem_6)) |>
+       filter(!is.na(hora_chegada_cliente_1) & !is.na(hora_inicio_descarreg_1))              |>
+       filter(!is.na(hora_descarga_agenda))                                                  |>
+  
+       rowwise(hora_descarga_agenda, hora_chegada_cliente_1, hora_chegada_cliente_2, 
+               hora_chegada_cliente_3, hora_chegada_cliente_4, hora_chegada_cliente_5,
+               hora_chegada_cliente_6)                                                 |>
+       mutate(menor_diferenca = min(
+         abs(difftime(hora_chegada_cliente_1, hora_descarga_agenda, units = "secs")),
+         abs(difftime(hora_chegada_cliente_2, hora_descarga_agenda, units = "secs")),
+         abs(difftime(hora_chegada_cliente_3, hora_descarga_agenda, units = "secs")),
+         abs(difftime(hora_chegada_cliente_4, hora_descarga_agenda, units = "secs")),
+         abs(difftime(hora_chegada_cliente_5, hora_descarga_agenda, units = "secs")),
+         abs(difftime(hora_chegada_cliente_6, hora_descarga_agenda, units = "secs")),
+         na.rm = TRUE),
+              hora_chegada_cliente = case_when(
+               abs(difftime(hora_chegada_cliente_1, hora_descarga_agenda, units = "secs")) == menor_diferenca ~ hora_chegada_cliente_1,
+               abs(difftime(hora_chegada_cliente_2, hora_descarga_agenda, units = "secs")) == menor_diferenca ~ hora_chegada_cliente_2,
+               abs(difftime(hora_chegada_cliente_3, hora_descarga_agenda, units = "secs")) == menor_diferenca ~ hora_chegada_cliente_3,
+               abs(difftime(hora_chegada_cliente_4, hora_descarga_agenda, units = "secs")) == menor_diferenca ~ hora_chegada_cliente_4,
+               abs(difftime(hora_chegada_cliente_5, hora_descarga_agenda, units = "secs")) == menor_diferenca ~ hora_chegada_cliente_5,
+               abs(difftime(hora_chegada_cliente_6, hora_descarga_agenda, units = "secs")) == menor_diferenca ~ hora_chegada_cliente_6),
+         .after = 3, .keep = "unused")                                                 |>
+       ungroup()                                                                       |>
+  
+       select(-c(hora_chegada_cliente_1, hora_chegada_cliente_2, hora_chegada_cliente_3,
+                 hora_chegada_cliente_4, hora_chegada_cliente_5, hora_chegada_cliente_6,
+                 menor_diferenca))                               |>
+       mutate(diferenca_agenda_chegada = (as.numeric(difftime(hora_chegada_cliente, hora_descarga_agenda, units = "secs"))/60)/60, 
+              tranp_atrasou_descarreg = as.factor(ifelse(diferenca_agenda_chegada > 1, 1, 0)), .after = 2) |>
+  
+       rowwise(hora_descarga_agenda, hora_inicio_descarreg_1, hora_inicio_descarreg_2, 
+               hora_inicio_descarreg_3, hora_inicio_descarreg_4, hora_inicio_descarreg_5,
+               hora_inicio_descarreg_6)                                                   |>
+       mutate(menor_diferenca = min(
+         abs(difftime(hora_inicio_descarreg_1, hora_descarga_agenda, units = "secs")),
+         abs(difftime(hora_inicio_descarreg_2, hora_descarga_agenda, units = "secs")),
+         abs(difftime(hora_inicio_descarreg_3, hora_descarga_agenda, units = "secs")),
+         abs(difftime(hora_inicio_descarreg_4, hora_descarga_agenda, units = "secs")),
+         abs(difftime(hora_inicio_descarreg_5, hora_descarga_agenda, units = "secs")),
+         abs(difftime(hora_inicio_descarreg_6, hora_descarga_agenda, units = "secs")),
+         na.rm = TRUE),
+              hora_inicio_descarreg = case_when(
+               abs(difftime(hora_inicio_descarreg_1, 
+                            hora_descarga_agenda, units = "secs")) == menor_diferenca ~ hora_inicio_descarreg_1,
+               abs(difftime(hora_inicio_descarreg_2, 
+                            hora_descarga_agenda, units = "secs")) == menor_diferenca ~ hora_inicio_descarreg_2,
+               abs(difftime(hora_inicio_descarreg_3, 
+                            hora_descarga_agenda, units = "secs")) == menor_diferenca ~ hora_inicio_descarreg_3,
+               abs(difftime(hora_inicio_descarreg_4, 
+                            hora_descarga_agenda, units = "secs")) == menor_diferenca ~ hora_inicio_descarreg_4,
+               abs(difftime(hora_inicio_descarreg_5, 
+                            hora_descarga_agenda, units = "secs")) == menor_diferenca ~ hora_inicio_descarreg_5,
+               abs(difftime(hora_inicio_descarreg_6, 
+                            hora_descarga_agenda, units = "secs")) == menor_diferenca ~ hora_inicio_descarreg_6),
+         .after = 6, .keep = "unused")                                                 |>
+       ungroup()                                                                       |>
+  
+       select(-c(hora_inicio_descarreg_1, hora_inicio_descarreg_2, hora_inicio_descarreg_3,
+                 hora_inicio_descarreg_4, hora_inicio_descarreg_5, hora_inicio_descarreg_6,
+                 menor_diferenca))                                                                   |>
+       mutate(diferenca_agenda_descarreg = (as.numeric(difftime(hora_inicio_descarreg, hora_descarga_agenda, units = "secs"))/60)/60, 
+              cliente_atrasou_descarreg = as.factor(ifelse(diferenca_agenda_descarreg > 1, 1, 0)), .after = 4) |>
+  
+       rowwise(hora_inicio_descarreg, hora_fim_descarreg_1, hora_fim_descarreg_2, 
+               hora_fim_descarreg_3, hora_fim_descarreg_4, hora_fim_descarreg_5,
+               hora_fim_descarreg_6)                                                                 |>
+       mutate(menor_diferenca = min(
+         abs(difftime(hora_fim_descarreg_1, hora_inicio_descarreg, units = "secs")),
+         abs(difftime(hora_fim_descarreg_2, hora_inicio_descarreg, units = "secs")),
+         abs(difftime(hora_fim_descarreg_3, hora_inicio_descarreg, units = "secs")),
+         abs(difftime(hora_fim_descarreg_4, hora_inicio_descarreg, units = "secs")),
+         abs(difftime(hora_fim_descarreg_5, hora_inicio_descarreg, units = "secs")),
+         abs(difftime(hora_fim_descarreg_6, hora_inicio_descarreg, units = "secs")),
+         na.rm = TRUE),
+              hora_fim_descarreg = case_when(
+               abs(difftime(hora_fim_descarreg_1, hora_inicio_descarreg, units = "secs")) == menor_diferenca ~ hora_fim_descarreg_1,
+               abs(difftime(hora_fim_descarreg_2, hora_inicio_descarreg, units = "secs")) == menor_diferenca ~ hora_fim_descarreg_2,
+               abs(difftime(hora_fim_descarreg_3, hora_inicio_descarreg, units = "secs")) == menor_diferenca ~ hora_fim_descarreg_3,
+               abs(difftime(hora_fim_descarreg_4, hora_inicio_descarreg, units = "secs")) == menor_diferenca ~ hora_fim_descarreg_4,
+               abs(difftime(hora_fim_descarreg_5, hora_inicio_descarreg, units = "secs")) == menor_diferenca ~ hora_fim_descarreg_5,
+               abs(difftime(hora_fim_descarreg_6, hora_inicio_descarreg, units = "secs")) == menor_diferenca ~ hora_fim_descarreg_6),
+         .after = 9, .keep = "unused")                                                 |>
+       ungroup()                                                                       |>
+  
+       select(-c(hora_fim_descarreg_1, hora_fim_descarreg_2, hora_fim_descarreg_3,
+                 hora_fim_descarreg_4, hora_fim_descarreg_5, hora_fim_descarreg_6,
+                 menor_diferenca))                                                     |>
+       mutate(delta_descarregamento = (as.numeric(difftime(hora_fim_descarreg, hora_inicio_descarreg, units = "secs"))/60)/60,
+              .after = 7)  |>
+       filter(!is.na(GR_JORNADA)) |>
+       mutate(delta_descarregamento = replace_na(delta_descarregamento, 0.3176311))
+       
+
+
+
+
+
+
+
+
+
+
+
+p.atraso.transportador = 1948/2724       
+p.atraso.cliente = 2209/2724       
+```
+# df modelos 
+
+```{r}
+todo.processo = df.5 |>
+       select(tranp_atrasou_carreg, tranp_atrasou_descarreg,
+              cliente_atrasou_carreg, cliente_atrasou_descarreg, everything()) |>
+       mutate(cenarios = as.factor(case_when(
+        tranp_atrasou_carreg == 0 & tranp_atrasou_descarreg == 0 & cliente_atrasou_carreg == 0 & cliente_atrasou_descarreg == 0 ~ 1,
+        tranp_atrasou_carreg == 0 & tranp_atrasou_descarreg == 0 & cliente_atrasou_carreg == 0 & cliente_atrasou_descarreg == 1 ~ 2,
+        tranp_atrasou_carreg == 0 & tranp_atrasou_descarreg == 0 & cliente_atrasou_carreg == 1 & cliente_atrasou_descarreg == 0 ~ 3,
+        tranp_atrasou_carreg == 0 & tranp_atrasou_descarreg == 0 & cliente_atrasou_carreg == 1 & cliente_atrasou_descarreg == 1 ~ 4,
+        tranp_atrasou_carreg == 0 & tranp_atrasou_descarreg == 1 & cliente_atrasou_carreg == 0 & cliente_atrasou_descarreg == 0 ~ 5,
+        tranp_atrasou_carreg == 0 & tranp_atrasou_descarreg == 1 & cliente_atrasou_carreg == 0 & cliente_atrasou_descarreg == 1 ~ 6,
+        tranp_atrasou_carreg == 0 & tranp_atrasou_descarreg == 1 & cliente_atrasou_carreg == 1 & cliente_atrasou_descarreg == 0 ~ 7,
+        tranp_atrasou_carreg == 0 & tranp_atrasou_descarreg == 1 & cliente_atrasou_carreg == 1 & cliente_atrasou_descarreg == 1 ~ 8,
+        tranp_atrasou_carreg == 1 & tranp_atrasou_descarreg == 0 & cliente_atrasou_carreg == 0 & cliente_atrasou_descarreg == 0 ~ 9,
+        tranp_atrasou_carreg == 1 & tranp_atrasou_descarreg == 0 & cliente_atrasou_carreg == 0 & cliente_atrasou_descarreg == 1 ~ 10,
+        tranp_atrasou_carreg == 1 & tranp_atrasou_descarreg == 0 & cliente_atrasou_carreg == 1 & cliente_atrasou_descarreg == 0 ~ 11,
+        tranp_atrasou_carreg == 1 & tranp_atrasou_descarreg == 0 & cliente_atrasou_carreg == 1 & cliente_atrasou_descarreg == 1 ~ 12,
+        tranp_atrasou_carreg == 1 & tranp_atrasou_descarreg == 1 & cliente_atrasou_carreg == 0 & cliente_atrasou_descarreg == 0 ~ 13,
+        tranp_atrasou_carreg == 1 & tranp_atrasou_descarreg == 1 & cliente_atrasou_carreg == 0 & cliente_atrasou_descarreg == 1 ~ 14,
+        tranp_atrasou_carreg == 1 & tranp_atrasou_descarreg == 1 & cliente_atrasou_carreg == 1 & cliente_atrasou_descarreg == 0 ~ 15,
+        tranp_atrasou_carreg == 1 & tranp_atrasou_descarreg == 1 & cliente_atrasou_carreg == 1 & cliente_atrasou_descarreg == 1 ~ 16,
+        TRUE ~ NA_real_)), 
+        
+        cliente_atrasou = as.factor(ifelse(cliente_atrasou_carreg == 1 | cliente_atrasou_descarreg == 1, 1, 0)),
+        transp_atrasou = as.factor(ifelse(tranp_atrasou_carreg == 1 | tranp_atrasou_descarreg == 1, 1, 0)), .after = 4) |>
+  
+        select(-c(hora_descarga_agenda, hora_chegada_cliente, hora_inicio_carreg, hora_inicio_descarreg,
+                  hora_fim_descarreg, hora_fim_carreg, id_CPF_MOTO)) |>
+  
+        mutate(motorista    = as.factor(cpf_moto),
+               CLIENTE      = as.factor(CLIENTE),
+               troca_ordem  = as.factor(troca_ordem),
+               troc_h_carga = as.factor(troc_h_carga),
+               troc_h_descarga  = as.factor(troc_h_descarga),
+               troc_recurso = as.factor(troc_recurso),
+               recurso_extra    = as.factor(recurso_extra),
+               isca         = as.factor(isca),
+               retorno      = as.factor(retorno),
+               possui_prioridade = as.factor(possui_prioridade),
+               GR_JORNADA   = as.factor(GR_JORNADA),
+               CIDADE_OPERACO    = as.factor(CIDADE_OPERACO),
+               OPERACAO     = as.factor(OPERACAO),
+               ERAS_DESCRICAO    = as.factor(ERAS_DESCRICAO),
+               MARCA_CAVALO = as.factor(MARCA_CAVALO),
+               MARCA_CARRETA     = as.factor(MARCA_CARRETA),
+               rota_agrupada     = as.factor(rota_agrupada),
+               rota_aprovada     = as.factor(rota_aprovada),
+                
+               PALLETS          = as.numeric(PALLETS),
+               numero_acessos   = as.numeric(numero_acessos),
+               numero_de_macros = as.numeric(numero_de_macros),
+               numero_manutencao   = as.numeric(numero_manutencao),
+               ultimo_odometro_dia = as.numeric(ultimo_odometro_dia),
+               IDADE_CAVALO  = as.numeric(IDADE_CAVALO),
+               IDADE_CARRETA = as.numeric(IDADE_CARRETA),
+               numero_paradas_proibidas = as.numeric(numero_paradas_proibidas),
+               VIAG_VALOR_CARGA = as.numeric(VIAG_VALOR_CARGA),
+               VIAG_PESO_TOTAL  = as.numeric(VIAG_PESO_TOTAL),
+               VIAG_DISTANCIA   = as.numeric(VIAG_DISTANCIA),
+               delta_inicio_cadastro    = as.numeric(delta_inicio_cadastro),
+               delta_fim_inicio = as.numeric(delta_fim_inicio),
+               numero_paradas.rast = as.numeric(numero_paradas.x),
+               numero_paradas.gris = as.numeric(numero_paradas.y))  |>
+        select(-c(numero_paradas.x, numero_paradas.y, cpf_moto))              |>
+        na.omit()
+
+inicio.processo = df.4 |> 
+                  select(tranp_atrasou_carreg, cliente_atrasou_carreg, everything())          |>
+                  mutate(cenarios = as.factor(case_when(
+                          tranp_atrasou_carreg == 0 &  cliente_atrasou_carreg == 0  ~ 1,
+                          tranp_atrasou_carreg == 0 &  cliente_atrasou_carreg == 1  ~ 2,
+                          tranp_atrasou_carreg == 1 &  cliente_atrasou_carreg == 0  ~ 3,
+                          tranp_atrasou_carreg == 1 &  cliente_atrasou_carreg == 1  ~ 4,
+                          TRUE ~ NA_real_))) |>
+                  mutate(atrasou = as.factor(ifelse(tranp_atrasou_carreg == 1 | cliente_atrasou_carreg == 1, 1, 0)), .after = 2) |>
+                  select(-c(hora_descarga_agenda, hora_chegada_cliente, hora_inicio_carreg,
+                            hora_fim_carreg, id_CPF_MOTO, id_PLACA.y, id_PLACA.x,
+                            hora_carga_agenda, hora_chegada_cliente_1:hora_chegada_cliente_6,
+                            hora_inicio_descarreg_1:hora_fim_descarreg_6, parado_ou_viagem))  |>
+                  mutate(motorista    = as.factor(cpf_moto),
+                         CLIENTE      = as.factor(CLIENTE),
+                         troca_ordem  = as.factor(troca_ordem),
+                         troc_h_carga = as.factor(troc_h_carga),
+                         troc_h_descarga  = as.factor(troc_h_descarga),
+                         troc_recurso = as.factor(troc_recurso),
+                         recurso_extra    = as.factor(recurso_extra),
+                         isca         = as.factor(isca),
+                         retorno      = as.factor(retorno),
+                         possui_prioridade = as.factor(possui_prioridade),
+                         GR_JORNADA   = as.factor(GR_JORNADA),
+                         CIDADE_OPERACO    = as.factor(CIDADE_OPERACO),
+                         OPERACAO     = as.factor(OPERACAO),
+                         ERAS_DESCRICAO    = as.factor(ERAS_DESCRICAO),
+                         MARCA_CAVALO = as.factor(MARCA_CAVALO),
+                         MARCA_CARRETA     = as.factor(MARCA_CARRETA),
+                         rota_agrupada     = as.factor(rota_agrupada),
+                         rota_aprovada     = as.factor(rota_aprovada),
+                          
+                         PALLETS          = as.numeric(PALLETS),
+                         numero_acessos   = as.numeric(numero_acessos),
+                         numero_de_macros = as.numeric(numero_de_macros),
+                         numero_manutencao   = as.numeric(numero_manutencao),
+                         ultimo_odometro_dia = as.numeric(ultimo_odometro_dia),
+                         IDADE_CAVALO  = as.numeric(IDADE_CAVALO),
+                         IDADE_CARRETA = as.numeric(IDADE_CARRETA),
+                         numero_paradas_proibidas = as.numeric(numero_paradas_proibidas),
+                         VIAG_VALOR_CARGA = as.numeric(VIAG_VALOR_CARGA),
+                         VIAG_PESO_TOTAL  = as.numeric(VIAG_PESO_TOTAL),
+                         VIAG_DISTANCIA   = as.numeric(VIAG_DISTANCIA),
+                         delta_inicio_cadastro    = as.numeric(delta_inicio_cadastro),
+                         delta_fim_inicio = as.numeric(delta_fim_inicio),
+                         numero_paradas.rast = as.numeric(numero_paradas.x),
+                         numero_paradas.gris = as.numeric(numero_paradas.y))  |>
+                  select(-c(numero_paradas.x, numero_paradas.y, cpf_moto))              |>
+                  na.omit()
+
+```
+
+
+# df dissertação
+```{r}
+save(inicio.processo,
+     todo.processo,
+     file = paste0(getwd(), "/c. exploração de dados/atrasos_processo.RData"))
+```
+
+

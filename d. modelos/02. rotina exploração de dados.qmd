@@ -1,0 +1,668 @@
+---
+title: "02. rotina exploração de dados"
+author: "Matheus Lazzari Nicola"
+format: html
+editor: visual
+---
+
+# pacotes
+
+```{r}
+#| warning: false
+#| echo: false
+
+pkgs<-c("tidyverse", "openxlsx", "patchwork")
+
+new.packages <- pkgs[!(pkgs %in% installed.packages()[,"Package"])]
+
+if(length(new.packages)) install.packages(new.packages)
+
+invisible(lapply(pkgs, library, character.only = TRUE))
+rm(pkgs, new.packages)
+
+conflict_prefer("filter", "dplyr")
+conflict_prefer("lag", "dplyr")
+
+```
+
+# base de dados
+
+```{r}
+load("c. exploração de dados/atrasos_processo.RData")
+
+inicio.processo = inicio.processo |>
+                  droplevels() |>
+                  mutate(PALLETS = as.numeric(substr(PALLETS, 1, 2)))
+
+todo.processo = todo.processo |>
+                mutate(atrasou = case_when(cenarios == 1 ~ 1, .default = 0), .before = 1) |>
+                droplevels() 
+
+# função para renomear os níveis das variáveis categóricas
+rename_levels <- function(factor_var, prefix = "Category") {
+  levels(factor_var) <- paste0(prefix, seq_along(levels(factor_var)))
+  return(factor_var)
+}
+
+
+original_levels <- levels(todo.processo$CLIENTE)
+new_levels <- paste0("cliente_", seq_along(original_levels))
+
+# Create a lookup table (data frame)
+lookup_table <- data.frame(
+  Original = original_levels,
+  New_Code = new_levels
+)
+
+# View the lookup table
+print(lookup_table)
+
+# Rename the levels using the function
+inicio.processo$CLIENTE <- rename_levels(inicio.processo$CLIENTE, prefix = "cliente_")
+todo.processo$CLIENTE <- rename_levels(todo.processo$CLIENTE, prefix = "cliente_")
+
+rm(lookup_table, new_levels, original_levels, rename_levels)
+```
+
+
+```{r}
+# Definir as variáveis endógenas (Y)
+endogenas <- c(
+  'tranp_atrasou_carreg', 
+  'cliente_atrasou_carreg', 
+  'atrasou', 
+  'diferenca_agenda_chegada', 
+  'diferenca_agenda_carreg', 
+  'delta_carregamento', 
+  'motorista',
+  'cenarios'
+)
+
+# Definir as variáveis a serem descartadas
+descartadas = c('interestado', 'numero_paradas.gris', 'cliente_monitora', 
+                'ERAS_DESCRICAO', 'delta_inicio_cadastro', 'delta_pinicio_inicio',
+                'delta_pfim_fim', 'intraestado')
+
+# Criar a lista de variáveis exógenas (X) excluindo as variáveis endógenas e as descartadas
+exogenas = setdiff(names(inicio.processo), c(endogenas, descartadas))
+
+
+
+# Criar os data frames Y e X
+Y = inicio.processo[, endogenas]
+X = inicio.processo[, exogenas]
+
+
+# base de dados apenas do início do processo para os modelos logit e multinomial
+dados_logit_ip = inicio.processo[, c('atrasou', names(X))] |> droplevels()
+attr(dados_logit_ip, "na.action") <- NULL
+dados_logit_ip <- unique(dados_logit_ip)
+
+dados_mnomial_ip = inicio.processo[, c('cenarios', names(X))] |> droplevels()
+attr(dados_mnomial_ip, "na.action") <- NULL
+dados_mnomial_ip <- unique(dados_mnomial_ip)
+
+
+## repetir o processo para os dados de todo processo
+
+# Definir as variáveis endógenas (Y)
+endogenas <- c(
+  'tranp_atrasou_carreg',
+  'tranp_atrasou_descarreg',
+  'cliente_atrasou_carreg',
+  'cliente_atrasou_descarreg',
+  'atrasou', 
+  'cliente_atrasou',
+  'transp_atrasou',
+  'diferenca_agenda_chegada',
+  'diferenca_agenda_descarreg',
+  'delta_descarregamento',
+  'diferenca_agenda_carreg', 
+  'delta_carregamento', 
+  'delta_fim_inicio',
+  'motorista',
+  'cenarios'
+)
+
+# Definir as variáveis a serem descartadas
+descartadas = c('interestado', 'numero_paradas.gris', 'cliente_monitora', 
+                'ERAS_DESCRICAO', 'delta_inicio_cadastro', 'delta_pinicio_inicio',
+                'delta_pfim_fim', 'intraestado', 'parado_ou_viagem')
+
+# Criar a lista de variáveis exógenas (X) excluindo as variáveis endógenas e as descartadas
+exogenas = setdiff(names(todo.processo), c(endogenas, descartadas))
+
+
+# Criar os data frames Y e X
+Y = todo.processo[, endogenas]
+X = todo.processo[, exogenas]
+
+
+# base de dados de todo o processo para os modelos logit e multinomial
+dados_logit_tp = todo.processo[, c('atrasou', names(X))] |> droplevels()
+attr(dados_logit_tp, "na.action") <- NULL
+dados_logit_tp <- unique(dados_logit_tp)
+
+dados_mnomial_tp = todo.processo[, c('cenarios', names(X))] |> droplevels()
+attr(dados_mnomial_tp, "na.action") <- NULL
+dados_mnomial_tp <- unique(dados_mnomial_tp)
+
+
+
+
+
+rm(endogenas, descartadas, exogenas, X, Y)
+```
+
+# exploração de dados
+
+## bd inicio processo
+
+### categóricas
+
+```{r}
+# início do processo logit
+## Lista de variáveis categóricas (excluindo a variável multinominal 'cenarios')
+categorical_vars_lip <- names(dados_logit_ip)[sapply(dados_logit_ip, is.factor) & names(dados_logit_ip) != "atrasou"]
+## Gerar tabelas cruzadas para cada variável categórica em relação à 'cenarios'
+resultados <- lapply(categorical_vars_lip, function(var) {
+  tbl <- as.data.frame.matrix(table(dados_logit_ip[[var]], dados_logit_ip$atrasou))
+  tbl$Variable <- var
+  tbl$Category <- rownames(tbl)
+  rownames(tbl) <- NULL
+  tbl
+})
+## Empilhar os resultados em um único data frame
+resultados_logit_ip <- do.call(rbind, resultados)
+## Reordenar colunas para melhor organização
+resultados_logit_ip <- resultados_logit_ip[, c("Variable", "Category", setdiff(names(resultados_logit_ip), c("Variable", "Category")))]
+
+
+
+# início do processo multinominal 
+## Lista de variáveis categóricas (excluindo a variável multinominal 'cenarios')
+categorical_vars_mip <- names(dados_mnomial_ip)[sapply(dados_mnomial_ip, is.factor) & names(dados_mnomial_ip) != "cenarios"]
+## Gerar tabelas cruzadas para cada variável categórica em relação à 'cenarios'
+resultados <- lapply(categorical_vars_lip, function(var) {
+  tbl <- as.data.frame.matrix(table(dados_mnomial_ip[[var]], dados_mnomial_ip$cenarios))
+  tbl$Variable <- var
+  tbl$Category <- rownames(tbl)
+  rownames(tbl) <- NULL
+  tbl
+})
+## Empilhar os resultados em um único data frame
+resultados_mult_ip <- do.call(rbind, resultados)
+## Reordenar colunas para melhor organização
+resultados_mult_ip <- resultados_mult_ip[, c("Variable", "Category", setdiff(names(resultados_mult_ip), c("Variable", "Category")))]
+
+
+# Salvar o resultado em um arquivo Excel
+write.xlsx(resultados_logit_ip, file = "tip_categoricas.xlsx", rowNames = FALSE)
+write.xlsx(resultados_mult_ip, file = "mip_categoricas.xlsx", rowNames = FALSE)
+```
+
+### contínuas
+
+```{r}
+
+# Selecionar apenas as variáveis numéricas
+numerical_vars <- dados_logit_ip %>%
+  select(where(is.numeric)) %>%
+  names()
+
+# Selecionar apenas as variáveis categóricas
+categorical_vars <- names(dados_logit_ip)[sapply(dados_logit_ip, is.factor) & names(dados_logit_ip) != "atrasou"] 
+
+# Criar uma lista de boxplots para cada combinação de variável numérica e categórica
+boxplots <- map2(numerical_vars, seq_along(numerical_vars), function(num_var, num_index) {
+  map2(categorical_vars, seq_along(categorical_vars), function(cat_var, cat_index) {
+    plot_number <- sprintf("boxplot %02d", (num_index - 1) * length(categorical_vars) + cat_index)
+    ggplot(dados_logit_ip, aes(x = !!sym(cat_var), y = !!sym(num_var), fill = atrasou)) +
+      geom_boxplot(width = 0.6, outlier.shape = NA, alpha = 0.8) +
+      theme_minimal(base_size = 8) +
+      labs(
+        title = plot_number,
+        x = cat_var,
+        y = NULL,
+        fill = "atrasou?"
+      ) +
+      theme(
+        legend.position = "none",
+        plot.title = element_text(hjust = 0, size = 10, face = "bold", margin = margin(b = 10)),
+        axis.text.y = element_text(size = 8, margin = margin(r = 10)),
+        axis.text.x = element_text(angle = 90, hjust = 1, size = 8)
+      )
+  })
+})
+
+
+# Exibir o primeiro boxplot (para a primeira variável numérica e categórica como exemplo)
+boxplots[[1]][[1]]
+
+
+```
+
+
+```{r}
+# PALLETES
+
+linha1 <- boxplots[[1]][[1]]
+linha2 <- boxplots[[1]][[2]] + boxplots[[1]][[11]] + plot_layout(ncol = 2, widths = c(1, 3))
+linha3 <- boxplots[[1]][[3]] + boxplots[[1]][[4]] + boxplots[[1]][[12]] + plot_layout(ncol = 3, widths = c(1, 1, 2))
+linha4 <- boxplots[[1]][[5]] + boxplots[[1]][[6]] + boxplots[[1]][[13]] + plot_layout(ncol = 3, widths = c(1, 1, 2))
+linha5 <- boxplots[[1]][[7]] + boxplots[[1]][[14]] + plot_layout(ncol = 2, widths = c(1, 3))
+linha6 <- boxplots[[1]][[8]] + boxplots[[1]][[9]] + boxplots[[1]][[10]] + boxplots[[1]][[16]] + plot_layout(ncol = 4, widths = c(1, 1, 1, 1))
+linha7 <- boxplots[[1]][[15]]
+
+layout_final_a <- (linha1 / linha2 / linha3) + plot_layout(heights = c(2, 1, 1), guides = "collect") &
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        legend.box.margin = margin(t = 8, b = 8),
+        legend.justification = "left",
+        legend.key.size = unit(1, "lines"))
+
+layout_final_b <- (linha4 / linha5 / linha6 / linha7) + plot_layout(heights = c(1, 1, 1, 1), guides = "collect") &
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        legend.box.margin = margin(t = 8, b = 8),
+        legend.justification = "left",
+        legend.key.size = unit(1, "lines"))
+
+ggsave("palletes_A.jpg", plot = layout_final_a, width = 2480  / 300 , height = 3800  / 300 , dpi = 300 , units = "in")
+ggsave("palletes_B.jpg", plot = layout_final_b, width = 2480  / 300 , height = 3800  / 300 , dpi = 300 , units = "in")
+
+
+# NÚMERO DE ACESSOS
+
+linha1 <- boxplots[[2]][[1]]
+linha2 <- boxplots[[2]][[2]] + boxplots[[2]][[11]] + plot_layout(ncol = 2, widths = c(1, 3))
+linha3 <- boxplots[[2]][[3]] + boxplots[[2]][[4]] + boxplots[[2]][[12]] + plot_layout(ncol = 3, widths = c(1, 1, 2))
+linha4 <- boxplots[[2]][[5]] + boxplots[[2]][[6]] + boxplots[[2]][[13]] + plot_layout(ncol = 3, widths = c(1, 1, 2))
+linha5 <- boxplots[[2]][[7]] + boxplots[[2]][[14]] + plot_layout(ncol = 2, widths = c(1, 3))
+linha6 <- boxplots[[2]][[8]] + boxplots[[2]][[9]] + boxplots[[2]][[10]] + boxplots[[2]][[16]] + plot_layout(ncol = 4, widths = c(1, 1, 1, 1))
+linha7 <- boxplots[[2]][[15]]
+
+layout_final_a <- (linha1 / linha2 / linha3) + plot_layout(heights = c(2, 1, 1), guides = "collect") &
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        legend.box.margin = margin(t = 8, b = 8),
+        legend.justification = "left",
+        legend.key.size = unit(1, "lines"))
+
+layout_final_b <- (linha4 / linha5 / linha6 / linha7) + plot_layout(heights = c(1, 1, 1, 1), guides = "collect") &
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        legend.box.margin = margin(t = 8, b = 8),
+        legend.justification = "left",
+        legend.key.size = unit(1, "lines"))
+
+ggsave("acessos_A.jpg", plot = layout_final_a, width = 2480  / 300 , height = 3800  / 300 , dpi = 300 , units = "in")
+ggsave("acessos_B.jpg", plot = layout_final_b, width = 2480  / 300 , height = 3800  / 300 , dpi = 300 , units = "in")
+
+
+# NÚMERO DE MACROS
+
+linha1 <- boxplots[[3]][[1]]
+linha2 <- boxplots[[3]][[2]] + boxplots[[3]][[11]] + plot_layout(ncol = 2, widths = c(1, 3))
+linha3 <- boxplots[[3]][[3]] + boxplots[[3]][[4]] + boxplots[[3]][[12]] + plot_layout(ncol = 3, widths = c(1, 1, 2))
+linha4 <- boxplots[[3]][[5]] + boxplots[[3]][[6]] + boxplots[[3]][[13]] + plot_layout(ncol = 3, widths = c(1, 1, 2))
+linha5 <- boxplots[[3]][[7]] + boxplots[[3]][[14]] + plot_layout(ncol = 2, widths = c(1, 3))
+linha6 <- boxplots[[3]][[8]] + boxplots[[3]][[9]] + boxplots[[3]][[10]] + boxplots[[3]][[16]] + plot_layout(ncol = 4, widths = c(1, 1, 1, 1))
+linha7 <- boxplots[[3]][[15]]
+
+layout_final_a <- (linha1 / linha2 / linha3) + plot_layout(heights = c(2, 1, 1), guides = "collect") &
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        legend.box.margin = margin(t = 8, b = 8),
+        legend.justification = "left",
+        legend.key.size = unit(1, "lines"))
+
+layout_final_b <- (linha4 / linha5 / linha6 / linha7) + plot_layout(heights = c(1, 1, 1, 1), guides = "collect") &
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        legend.box.margin = margin(t = 8, b = 8),
+        legend.justification = "left",
+        legend.key.size = unit(1, "lines"))
+
+ggsave("macros_A.jpg", plot = layout_final_a, width = 2480  / 300 , height = 3800  / 300 , dpi = 300 , units = "in")
+ggsave("macros_B.jpg", plot = layout_final_b, width = 2480  / 300 , height = 3800  / 300 , dpi = 300 , units = "in")
+
+
+
+# NUMERO DE MANUTENÇÃO
+
+linha1 <- boxplots[[4]][[1]]
+linha2 <- boxplots[[4]][[2]] + boxplots[[4]][[11]] + plot_layout(ncol = 2, widths = c(1, 3))
+linha3 <- boxplots[[4]][[3]] + boxplots[[4]][[4]] + boxplots[[4]][[12]] + plot_layout(ncol = 3, widths = c(1, 1, 2))
+linha4 <- boxplots[[4]][[5]] + boxplots[[4]][[6]] + boxplots[[4]][[13]] + plot_layout(ncol = 3, widths = c(1, 1, 2))
+linha5 <- boxplots[[4]][[7]] + boxplots[[4]][[14]] + plot_layout(ncol = 2, widths = c(1, 3))
+linha6 <- boxplots[[4]][[8]] + boxplots[[4]][[9]] + boxplots[[4]][[10]] + boxplots[[4]][[16]] + plot_layout(ncol = 4, widths = c(1, 1, 1, 1))
+linha7 <- boxplots[[4]][[15]]
+
+layout_final_a <- (linha1 / linha2 / linha3) + plot_layout(heights = c(2, 1, 1), guides = "collect") &
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        legend.box.margin = margin(t = 8, b = 8),
+        legend.justification = "left",
+        legend.key.size = unit(1, "lines"))
+
+layout_final_b <- (linha4 / linha5 / linha6 / linha7) + plot_layout(heights = c(1, 1, 1, 1), guides = "collect") &
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        legend.box.margin = margin(t = 8, b = 8),
+        legend.justification = "left",
+        legend.key.size = unit(1, "lines"))
+
+ggsave("manutencao_A.jpg", plot = layout_final_a, width = 2480  / 300 , height = 3800  / 300 , dpi = 300 , units = "in")
+ggsave("manutencao_B.jpg", plot = layout_final_b, width = 2480  / 300 , height = 3800  / 300 , dpi = 300 , units = "in")
+
+# ODOMETRO
+
+linha1 <- boxplots[[5]][[1]]
+linha2 <- boxplots[[5]][[2]] + boxplots[[5]][[11]] + plot_layout(ncol = 2, widths = c(1, 3))
+linha3 <- boxplots[[5]][[3]] + boxplots[[5]][[4]] + boxplots[[5]][[12]] + plot_layout(ncol = 3, widths = c(1, 1, 2))
+linha4 <- boxplots[[5]][[5]] + boxplots[[5]][[6]] + boxplots[[5]][[13]] + plot_layout(ncol = 3, widths = c(1, 1, 2))
+linha5 <- boxplots[[5]][[7]] + boxplots[[5]][[14]] + plot_layout(ncol = 2, widths = c(1, 3))
+linha6 <- boxplots[[5]][[8]] + boxplots[[5]][[9]] + boxplots[[5]][[10]] + boxplots[[5]][[16]] + plot_layout(ncol = 4, widths = c(1, 1, 1, 1))
+linha7 <- boxplots[[5]][[15]]
+
+layout_final_a <- (linha1 / linha2 / linha3) + plot_layout(heights = c(2, 1, 1), guides = "collect") &
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        legend.box.margin = margin(t = 8, b = 8),
+        legend.justification = "left",
+        legend.key.size = unit(1, "lines"))
+
+layout_final_b <- (linha4 / linha5 / linha6 / linha7) + plot_layout(heights = c(1, 1, 1, 1), guides = "collect") &
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        legend.box.margin = margin(t = 8, b = 8),
+        legend.justification = "left",
+        legend.key.size = unit(1, "lines"))
+
+ggsave("odometro_A.jpg", plot = layout_final_a, width = 2480  / 300 , height = 3800  / 300 , dpi = 300 , units = "in")
+ggsave("odometro_B.jpg", plot = layout_final_b, width = 2480  / 300 , height = 3800  / 300 , dpi = 300 , units = "in")
+
+# IDADE DO CAMINHÃO
+
+linha1 <- boxplots[[6]][[1]]
+linha2 <- boxplots[[6]][[2]] + boxplots[[6]][[11]] + plot_layout(ncol = 2, widths = c(1, 3))
+linha3 <- boxplots[[6]][[3]] + boxplots[[6]][[4]] + boxplots[[6]][[12]] + plot_layout(ncol = 3, widths = c(1, 1, 2))
+linha4 <- boxplots[[6]][[5]] + boxplots[[6]][[6]] + boxplots[[6]][[13]] + plot_layout(ncol = 3, widths = c(1, 1, 2))
+linha5 <- boxplots[[6]][[7]] + boxplots[[6]][[14]] + plot_layout(ncol = 2, widths = c(1, 3))
+linha6 <- boxplots[[6]][[8]] + boxplots[[6]][[9]] + boxplots[[6]][[10]] + boxplots[[6]][[16]] + plot_layout(ncol = 4, widths = c(1, 1, 1, 1))
+linha7 <- boxplots[[6]][[15]]
+
+layout_final_a <- (linha1 / linha2 / linha3) + plot_layout(heights = c(2, 1, 1), guides = "collect") &
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        legend.box.margin = margin(t = 8, b = 8),
+        legend.justification = "left",
+        legend.key.size = unit(1, "lines"))
+
+layout_final_b <- (linha4 / linha5 / linha6 / linha7) + plot_layout(heights = c(1, 1, 1, 1), guides = "collect") &
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        legend.box.margin = margin(t = 8, b = 8),
+        legend.justification = "left",
+        legend.key.size = unit(1, "lines"))
+
+ggsave("cavalo_A.jpg", plot = layout_final_a, width = 2480  / 300 , height = 3800  / 300 , dpi = 300 , units = "in")
+ggsave("cavalo_B.jpg", plot = layout_final_b, width = 2480  / 300 , height = 3800  / 300 , dpi = 300 , units = "in")
+
+
+# IDADE DA CARRETA
+
+linha1 <- boxplots[[7]][[1]]
+linha2 <- boxplots[[7]][[2]] + boxplots[[7]][[11]] + plot_layout(ncol = 2, widths = c(1, 3))
+linha3 <- boxplots[[7]][[3]] + boxplots[[7]][[4]] + boxplots[[7]][[12]] + plot_layout(ncol = 3, widths = c(1, 1, 2))
+linha4 <- boxplots[[7]][[5]] + boxplots[[7]][[6]] + boxplots[[7]][[13]] + plot_layout(ncol = 3, widths = c(1, 1, 2))
+linha5 <- boxplots[[7]][[7]] + boxplots[[7]][[14]] + plot_layout(ncol = 2, widths = c(1, 3))
+linha6 <- boxplots[[7]][[8]] + boxplots[[7]][[9]] + boxplots[[7]][[10]] + boxplots[[7]][[16]] + plot_layout(ncol = 4, widths = c(1, 1, 1, 1))
+linha7 <- boxplots[[7]][[15]]
+
+layout_final_a <- (linha1 / linha2 / linha3) + plot_layout(heights = c(2, 1, 1), guides = "collect") &
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        legend.box.margin = margin(t = 8, b = 8),
+        legend.justification = "left",
+        legend.key.size = unit(1, "lines"))
+
+layout_final_b <- (linha4 / linha5 / linha6 / linha7) + plot_layout(heights = c(1, 1, 1, 1), guides = "collect") &
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        legend.box.margin = margin(t = 8, b = 8),
+        legend.justification = "left",
+        legend.key.size = unit(1, "lines"))
+
+ggsave("carreta_A.jpg", plot = layout_final_a, width = 2480  / 300 , height = 3800  / 300 , dpi = 300 , units = "in")
+ggsave("carreta_B.jpg", plot = layout_final_b, width = 2480  / 300 , height = 3800  / 300 , dpi = 300 , units = "in")
+
+
+# PARADAS PROIBIDAS
+
+linha1 <- boxplots[[8]][[1]]
+linha2 <- boxplots[[8]][[2]] + boxplots[[8]][[11]] + plot_layout(ncol = 2, widths = c(1, 3))
+linha3 <- boxplots[[8]][[3]] + boxplots[[8]][[4]] + boxplots[[8]][[12]] + plot_layout(ncol = 3, widths = c(1, 1, 2))
+linha4 <- boxplots[[8]][[5]] + boxplots[[8]][[6]] + boxplots[[8]][[13]] + plot_layout(ncol = 3, widths = c(1, 1, 2))
+linha5 <- boxplots[[8]][[7]] + boxplots[[8]][[14]] + plot_layout(ncol = 2, widths = c(1, 3))
+linha6 <- boxplots[[8]][[8]] + boxplots[[8]][[9]] + boxplots[[8]][[10]] + boxplots[[8]][[16]] + plot_layout(ncol = 4, widths = c(1, 1, 1, 1))
+linha7 <- boxplots[[8]][[15]]
+
+layout_final_a <- (linha1 / linha2 / linha3) + plot_layout(heights = c(2, 1, 1), guides = "collect") &
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        legend.box.margin = margin(t = 8, b = 8),
+        legend.justification = "left",
+        legend.key.size = unit(1, "lines"))
+
+layout_final_b <- (linha4 / linha5 / linha6 / linha7) + plot_layout(heights = c(1, 1, 1, 1), guides = "collect") &
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        legend.box.margin = margin(t = 8, b = 8),
+        legend.justification = "left",
+        legend.key.size = unit(1, "lines"))
+
+ggsave("paradasp_A.jpg", plot = layout_final_a, width = 2480  / 300 , height = 3800  / 300 , dpi = 300 , units = "in")
+ggsave("paradasp_B.jpg", plot = layout_final_b, width = 2480  / 300 , height = 3800  / 300 , dpi = 300 , units = "in")
+
+# VALOR DA CARGA
+
+linha1 <- boxplots[[9]][[1]]
+linha2 <- boxplots[[9]][[2]] + boxplots[[9]][[11]] + plot_layout(ncol = 2, widths = c(1, 3))
+linha3 <- boxplots[[9]][[3]] + boxplots[[9]][[4]] + boxplots[[9]][[12]] + plot_layout(ncol = 3, widths = c(1, 1, 2))
+linha4 <- boxplots[[9]][[5]] + boxplots[[9]][[6]] + boxplots[[9]][[13]] + plot_layout(ncol = 3, widths = c(1, 1, 2))
+linha5 <- boxplots[[9]][[7]] + boxplots[[9]][[14]] + plot_layout(ncol = 2, widths = c(1, 3))
+linha6 <- boxplots[[9]][[8]] + boxplots[[9]][[9]] + boxplots[[9]][[10]] + boxplots[[9]][[16]] + plot_layout(ncol = 4, widths = c(1, 1, 1, 1))
+linha7 <- boxplots[[9]][[15]]
+
+layout_final_a <- (linha1 / linha2 / linha3) + plot_layout(heights = c(2, 1, 1), guides = "collect") &
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        legend.box.margin = margin(t = 8, b = 8),
+        legend.justification = "left",
+        legend.key.size = unit(1, "lines"))
+
+layout_final_b <- (linha4 / linha5 / linha6 / linha7) + plot_layout(heights = c(1, 1, 1, 1), guides = "collect") &
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        legend.box.margin = margin(t = 8, b = 8),
+        legend.justification = "left",
+        legend.key.size = unit(1, "lines"))
+
+ggsave("valor_A.jpg", plot = layout_final_a, width = 2480  / 300 , height = 3800  / 300 , dpi = 300 , units = "in")
+ggsave("valor_B.jpg", plot = layout_final_b, width = 2480  / 300 , height = 3800  / 300 , dpi = 300 , units = "in")
+
+
+# PESO DA CARGA
+
+linha1 <- boxplots[[10]][[1]]
+linha2 <- boxplots[[10]][[2]] + boxplots[[10]][[11]] + plot_layout(ncol = 2, widths = c(1, 3))
+linha3 <- boxplots[[10]][[3]] + boxplots[[10]][[4]] + boxplots[[10]][[12]] + plot_layout(ncol = 3, widths = c(1, 1, 2))
+linha4 <- boxplots[[10]][[5]] + boxplots[[10]][[6]] + boxplots[[10]][[13]] + plot_layout(ncol = 3, widths = c(1, 1, 2))
+linha5 <- boxplots[[10]][[7]] + boxplots[[10]][[14]] + plot_layout(ncol = 2, widths = c(1, 3))
+linha6 <- boxplots[[10]][[8]] + boxplots[[10]][[9]] + boxplots[[10]][[10]] + boxplots[[10]][[16]] + plot_layout(ncol = 4, widths = c(1, 1, 1, 1))
+linha7 <- boxplots[[10]][[15]]
+
+layout_final_a <- (linha1 / linha2 / linha3) + plot_layout(heights = c(2, 1, 1), guides = "collect") &
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        legend.box.margin = margin(t = 8, b = 8),
+        legend.justification = "left",
+        legend.key.size = unit(1, "lines"))
+
+layout_final_b <- (linha4 / linha5 / linha6 / linha7) + plot_layout(heights = c(1, 1, 1, 1), guides = "collect") &
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        legend.box.margin = margin(t = 8, b = 8),
+        legend.justification = "left",
+        legend.key.size = unit(1, "lines"))
+
+ggsave("peso_A.jpg", plot = layout_final_a, width = 2480  / 300 , height = 3800  / 300 , dpi = 300 , units = "in")
+ggsave("peso_B.jpg", plot = layout_final_b, width = 2480  / 300 , height = 3800  / 300 , dpi = 300 , units = "in")
+
+
+
+
+# DISTANCE DA VIAGEM
+
+linha1 <- boxplots[[11]][[1]]
+linha2 <- boxplots[[11]][[2]] + boxplots[[11]][[11]] + plot_layout(ncol = 2, widths = c(1, 3))
+linha3 <- boxplots[[11]][[3]] + boxplots[[11]][[4]] + boxplots[[11]][[12]] + plot_layout(ncol = 3, widths = c(1, 1, 2))
+linha4 <- boxplots[[11]][[5]] + boxplots[[11]][[6]] + boxplots[[11]][[13]] + plot_layout(ncol = 3, widths = c(1, 1, 2))
+linha5 <- boxplots[[11]][[7]] + boxplots[[11]][[14]] + plot_layout(ncol = 2, widths = c(1, 3))
+linha6 <- boxplots[[11]][[8]] + boxplots[[11]][[9]] + boxplots[[11]][[10]] + boxplots[[11]][[16]] + plot_layout(ncol = 4, widths = c(1, 1, 1, 1))
+linha7 <- boxplots[[11]][[15]]
+
+layout_final_a <- (linha1 / linha2 / linha3) + plot_layout(heights = c(2, 1, 1), guides = "collect") &
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        legend.box.margin = margin(t = 8, b = 8),
+        legend.justification = "left",
+        legend.key.size = unit(1, "lines"))
+
+layout_final_b <- (linha4 / linha5 / linha6 / linha7) + plot_layout(heights = c(1, 1, 1, 1), guides = "collect") &
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        legend.box.margin = margin(t = 8, b = 8),
+        legend.justification = "left",
+        legend.key.size = unit(1, "lines"))
+
+ggsave("distancia_A.jpg", plot = layout_final_a, width = 2480  / 300 , height = 3800  / 300 , dpi = 300 , units = "in")
+ggsave("distancia_B.jpg", plot = layout_final_b, width = 2480  / 300 , height = 3800  / 300 , dpi = 300 , units = "in")
+
+# TEMPO DA VIAGEM
+
+linha1 <- boxplots[[12]][[1]]
+linha2 <- boxplots[[12]][[2]] + boxplots[[12]][[11]] + plot_layout(ncol = 2, widths = c(1, 3))
+linha3 <- boxplots[[12]][[3]] + boxplots[[12]][[4]] + boxplots[[12]][[12]] + plot_layout(ncol = 3, widths = c(1, 1, 2))
+linha4 <- boxplots[[12]][[5]] + boxplots[[12]][[6]] + boxplots[[12]][[13]] + plot_layout(ncol = 3, widths = c(1, 1, 2))
+linha5 <- boxplots[[12]][[7]] + boxplots[[12]][[14]] + plot_layout(ncol = 2, widths = c(1, 3))
+linha6 <- boxplots[[12]][[8]] + boxplots[[12]][[9]] + boxplots[[12]][[10]] + boxplots[[12]][[16]] + plot_layout(ncol = 4, widths = c(1, 1, 1, 1))
+linha7 <- boxplots[[11]][[15]]
+
+layout_final_a <- (linha1 / linha2 / linha3) + plot_layout(heights = c(2, 1, 1), guides = "collect") &
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        legend.box.margin = margin(t = 8, b = 8),
+        legend.justification = "left",
+        legend.key.size = unit(1, "lines"))
+
+layout_final_b <- (linha4 / linha5 / linha6 / linha7) + plot_layout(heights = c(1, 1, 1, 1), guides = "collect") &
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        legend.box.margin = margin(t = 8, b = 8),
+        legend.justification = "left",
+        legend.key.size = unit(1, "lines"))
+
+ggsave("tempo_A.jpg", plot = layout_final_a, width = 2480  / 300 , height = 3800  / 300 , dpi = 300 , units = "in")
+ggsave("tempo_B.jpg", plot = layout_final_b, width = 2480  / 300 , height = 3800  / 300 , dpi = 300 , units = "in")
+
+
+```
+
+
+
+
+## bd todo processo
+
+### categóricas
+
+```{r}
+# início do processo logit
+## Lista de variáveis categóricas (excluindo a variável multinominal 'cenarios')
+categorical_vars_ltp <- names(dados_logit_tp)[sapply(dados_logit_tp, is.factor) & names(dados_logit_tp) != "atrasou"]
+## Gerar tabelas cruzadas para cada variável categórica em relação à 'cenarios'
+resultados <- lapply(categorical_vars_ltp, function(var) {
+  tbl <- as.data.frame.matrix(table(dados_logit_tp[[var]], dados_logit_tp$atrasou))
+  tbl$Variable <- var
+  tbl$Category <- rownames(tbl)
+  rownames(tbl) <- NULL
+  tbl
+})
+## Empilhar os resultados em um único data frame
+resultados_logit_tp <- do.call(rbind, resultados)
+## Reordenar colunas para melhor organização
+resultados_logit_tp <- resultados_logit_tp[, c("Variable", "Category", setdiff(names(resultados_logit_tp), c("Variable", "Category")))]
+
+
+
+# início do processo multinominal 
+## Lista de variáveis categóricas (excluindo a variável multinominal 'cenarios')
+categorical_vars_mtp <- names(dados_mnomial_tp)[sapply(dados_mnomial_tp, is.factor) & names(dados_mnomial_tp) != "cenarios"]
+## Gerar tabelas cruzadas para cada variável categórica em relação à 'cenarios'
+resultados <- lapply(categorical_vars_mtp, function(var) {
+  tbl <- as.data.frame.matrix(table(dados_mnomial_tp[[var]], dados_mnomial_tp$cenarios))
+  tbl$Variable <- var
+  tbl$Category <- rownames(tbl)
+  rownames(tbl) <- NULL
+  tbl
+})
+## Empilhar os resultados em um único data frame
+resultados_mult_tp <- do.call(rbind, resultados)
+## Reordenar colunas para melhor organização
+resultados_mult_tp <- resultados_mult_tp[, c("Variable", "Category", setdiff(names(resultados_mult_tp), c("Variable", "Category")))]
+
+
+# Salvar o resultado em um arquivo Excel
+write.xlsx(resultados_logit_tp, file = "ltp_categoricas.xlsx", rowNames = FALSE)
+write.xlsx(resultados_mult_tp, file = "mtp_categoricas.xlsx", rowNames = FALSE)
+```
+
+
+### contínuas
+
+
+```{r}
+categoricas = c("CLIENTE", "troca_ordem", "troc_h_carga", "troc_h_descarga", "troc_recurso",
+                "recurso_extra", "isca", "retorno", "possui_prioridade", "GR_JORNADA", "CIDADE_OPERACO", 
+                "OPERACAO", "MARCA_CAVALO", "MARCA_CARRETA", "rota_agrupada", "rota_aprovada")
+numericas   = setdiff(names(dados_mnomial_tp), categoricas)[-1]
+```
+
+
+
