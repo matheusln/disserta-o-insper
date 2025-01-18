@@ -1,0 +1,444 @@
+---
+title: "03. modelos"
+author: "Matheus Lazzari Nicola"
+format: 
+  html:
+    math: mathjax
+    code-fold: true
+    code-summary: "mostre-me o código"
+    embed-resources: true
+    df-print: paged 
+    toc: true
+    toc-depth: 2
+    toc-location: left
+    toc-title: sumário executivo
+    grid:
+      sidebar-width: 200px
+      body-width: 900px  
+      margin-width: 200px
+      gutter-width: 1.5em
+---
+
+<style>
+  p {
+    text-align: justify;
+  }
+</style>
+
+# pacotes
+
+```{r}
+#| warning: false
+#| echo: false
+
+pkgs = c("tidyverse", "kableExtra", "FactoMineR", "factoextra", "Gifi", "BART", "glmnet", "pROC", "caret", "dbarts")
+
+new.packages = pkgs[!(pkgs %in% installed.packages()[,"Package"])]
+
+if(length(new.packages)) install.packages(new.packages)
+
+invisible(lapply(pkgs, library, character.only = TRUE))
+remove(pkgs, new.packages)
+
+```
+
+# base de dados
+
+```{r}
+# paste0(getwd(), "/c. exploração de dados/atrasos.RData")
+path.01 = "C:/Users/mathe/OneDrive/4.0 Pós-graduação/4.4b Dissertação Mestrado Profissional/c. exploração de dados/atrasos_processo.RData"
+
+load(path.01)
+
+atraso.carreg.transp = todo.processo |>
+                       select(-c(tranp_atrasou_carreg, tranp_atrasou_descarreg, cliente_atrasou_carreg,
+                                 cliente_atrasou_descarreg, cenarios, cliente_atrasou, diferenca_agenda_chegada,
+                                 diferenca_agenda_carreg, parado_ou_viagem, intraestado,
+                                 diferenca_agenda_descarreg, delta_descarregamento, delta_carregamento,
+                                 delta_inicio_cadastro, delta_fim_inicio, delta_pinicio_inicio, delta_pfim_fim, rota_agrupada)) |>
+                      unique()
+
+
+```
+
+# atrasos carreg transporte
+
+## análise de fatores de dados mistos (FAMD)
+
+```{r}
+# Executar a FAMD
+resultado_famd = FAMD(atraso.carreg.transp, ncp = 15, graph = FALSE)
+summary(resultado_famd)
+
+```
+
+::: {#famd .panel-tabset}
+### eigenvalues
+
+```{r}
+# Eigenvalues
+eig_valores = get_eigenvalue(resultado_famd)
+print(eig_valores)
+```
+
+1.  Autovalores (Variance) A linha "Variance" apresenta os autovalores de cada dimensão. Um autovalor representa a quantidade de variância que uma dimensão (ou componente) captura dos dados. Quanto maior o autovalor, mais informação (variância) essa dimensão explica.
+
+2.  Porcentagem de Variância (% of var.) Esta linha mostra a porcentagem da variância total dos dados explicada por cada dimensão. Por exemplo: A Dimensão 1 explica 9.07% da variância total. A Dimensão 2 explica 4.75%. Em geral, as primeiras dimensões carregam mais variância, e as subsequentes explicam menos.
+
+3.  Porcentagem Acumulada (Cumulative % of var.) Esta linha apresenta a soma cumulativa da variância explicada pelas dimensões até aquele ponto. Por exemplo: As duas primeiras dimensões juntas explicam 13.82% da variância total. As dez primeiras dimensões explicam 34.18% da variância total.
+
+    -   Em algumas análises, tentar capturar 70-80% da variância é um bom ponto de corte. Interpretação Prática Dimensão mais importante: A Dimensão 1 tem o maior autovalor (7.526) e explica 9.07% da variância. Esta dimensão provavelmente captura uma característica relevante e dominante nos dados.
+
+4.  Diminuição dos autovalores: Conforme avançamos para dimensões superiores (Dim.2, Dim.3, etc.), a contribuição para a variância total diminui. Isso é esperado, pois cada nova dimensão captura padrões menos significativos que não foram explicados pelas dimensões anteriores.
+
+Escolha do número de dimensões:
+
+Usar o critério de Kaiser (manter apenas as dimensões com autovalores \> 1) ou escolher o número de dimensões que explique uma variância acumulada suficiente (por exemplo, 60-70%).
+
+### observações
+
+```{r}
+# Extrair os resultados dos indivíduos
+individuos_resultado = get_famd_ind(resultado_famd)
+print(head(individuos_resultado$coord, 10))
+```
+
+Análise Adicional do Bloco dos Indivíduos, padrões notáveis:
+
+1.  Distâncias Altas:
+
+    -   Os indivíduos 2, 8, e 9 possuem distâncias maiores (10.015, 10.531, 8.624), sugerindo que eles são mais importantes para a formação das dimensões, já que estão mais afastados da origem (centroide) no espaço multidimensional.
+
+    -   Esses indivíduos são, portanto, mais discriminativos, capturando características significativas nas variáveis da análise.
+
+2.  Contribuição Relevante (ctr):
+
+    -   o Indivíduo 9 apresenta alta contribuição na Dimensão 1 (2.0%) e na Dimensão 2 (1.8%). Ele é importante para explicar a variância nas duas dimensões, sugerindo que esse indivíduo pode estar ligado a características que afetam diferentes aspectos do conjunto de dados.
+
+    -   Indivíduo 8 contribui bastante para a Dimensão 2 (3.8%), indicando que ele tem um impacto significativo em um padrão específico capturado nessa dimensão.
+
+3.  Qualidade da Representação (cos2):
+
+    -   Dimensão 1: O Indivíduo 6 tem um cos2 = 0.147 na Dimensão 1, sugerindo que ele é bem representado por essa dimensão.
+
+    -   Dimensão 2: O Indivíduo 10 tem um cos2 = 0.114, sugerindo que ele é representado com alta precisão na Dimensão 2.
+
+    -   Indivíduos com cos2 baixos (por exemplo, Indivíduos 1 e 3) têm uma projeção fraca nas primeiras três dimensões, o que sugere que eles podem ser melhor representados em dimensões superiores.
+
+### continuas
+
+```{r}
+# Plotar as variáveis contínuas nas Dimensões 1 e 2
+fviz_famd_var(resultado_famd, 
+              choice = "quanti.var",  # Especifica variáveis contínuas
+              col.var = "contrib", 
+              gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+              repel = TRUE,
+              title = "Variáveis Contínuas nas Dimensões 1 e 2")
+```
+
+
+::: column-margin
+
+```{r}
+variaveis_continuas = get_famd_var(resultado_famd, element = "quanti.var")
+# Listar as 5 variáveis contínuas mais importantes na Dimensão 1
+dim1_cont = variaveis_continuas$contrib[, "Dim.1"]
+print(head(sort(dim1_cont, decreasing = TRUE), 10))
+
+# Listar as 5 variáveis contínuas mais importantes na Dimensão 2
+dim2_cont = variaveis_continuas$contrib[, "Dim.2"]
+print(head(sort(dim2_cont, decreasing = TRUE), 10))
+```
+:::
+
+
+1.  Dim.x (Dim.1, Dim.2, Dim.3):
+
+    -   Mostra a correlação (ou coordenada) da variável com a respectiva dimensão.
+
+    -   Valores maiores (positivos ou negativos) indicam que a variável tem uma influência relevante nessa dimensão.
+
+2.  ctr (contribuição):
+
+    -   Representa a contribuição percentual da variável na formação da dimensão correspondente.
+
+    -   Variáveis com ctr alto são mais importantes para definir a dimensão.
+
+3.  cos2 (coseno ao quadrado):
+
+    -   Mede a qualidade da representação da variável na dimensão.
+
+    -   Um valor cos2 próximo de 1 indica que a variável é bem projetada nessa dimensão.
+
+    -   Valores baixos sugerem que a variável é mais relevante em outra dimensão.
+
+
+
+
+
+### categórigas
+
+```{r}
+# Gerar o gráfico para variáveis categóricas
+#fviz_famd_var(resultado_famd, 
+#              choice = "quali.var", 
+#              col.var = "contrib", 
+#              gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+#              repel = TRUE,
+#              title = "Variáveis Categóricas nas Dimensões 1 e 2")
+```
+
+```{r}
+variaveis_categoricas = get_famd_var(resultado_famd, element = "quali.var")
+# Listar as 5 variáveis categóricas mais importantes na Dimensão 1
+dim1_cat = variaveis_categoricas$contrib[, "Dim.1"]
+print(head(sort(dim1_cat, decreasing = TRUE), 10))
+
+# Listar as 5 variáveis categóricas mais importantes na Dimensão 2
+dim2_cat = variaveis_categoricas$contrib[, "Dim.2"]
+print(head(sort(dim2_cat, decreasing = TRUE), 10))
+```
+
+
+1.  Dim.x (Dim.1, Dim.2, Dim.3):
+
+    -   Exibe a coordenação da categoria na respectiva dimensão.
+
+    -   Valores mais altos (positivos ou negativos) indicam que essa categoria é fortemente associada à dimensão em questão.
+
+2.  ctr (contribuição):
+
+    -   Indica a contribuição percentual da categoria para a formação da dimensão correspondente.
+
+    -   Categorias com ctr alto são mais importantes para explicar a variação capturada na dimensão.
+
+3.  cos2 (coseno ao quadrado):
+
+    -   Mede a qualidade da representação da categoria na dimensão.
+
+    -   Um cos2 próximo de 1 indica que a categoria é bem projetada nessa dimensão e está bem explicada por ela.
+
+4.   v.test:
+
+    -   Estatística v.test mede a significância da contribuição da categoria para a dimensão. Valores mais altos em módulo (positivos ou negativos) indicam que a associação entre a categoria e a dimensão é mais forte e significativa.
+    
+
+
+### variáveis relevantes
+
+Dimensão 1
+```{r}
+# Dimensão 1 - Tabela de Variáveis Contínuas
+dim1_cont = variaveis_continuas$contrib[, "Dim.1", drop = FALSE] |>
+            as.data.frame() |>
+            rownames_to_column(var = "Variável") |>
+            rename(Contribuição = Dim.1)
+
+# Dimensão 1 - Tabela de Variáveis Categóricas
+dim1_cat = variaveis_categoricas$contrib[, "Dim.1", drop = FALSE] |>
+           as.data.frame() |>
+           rownames_to_column(var = "Variável") |>
+           rename(Contribuição = Dim.1)
+
+# Combinar as duas tabelas para a Dimensão 1
+tabela_dim1 = bind_rows(dim1_cont, dim1_cat) |>
+              arrange(desc(Contribuição)) |>
+              mutate(Contribuição_Acumulada = cumsum(Contribuição))
+
+print(tabela_dim1)
+```
+
+Dimensão 2
+
+```{r}
+# Dimensão 2 - Tabela de Variáveis Contínuas
+dim2_cont = variaveis_continuas$contrib[, "Dim.2", drop = FALSE] |>
+            as.data.frame() |>
+            rownames_to_column(var = "Variável") |>
+            rename(Contribuição = Dim.2)
+
+# Dimensão 2 - Tabela de Variáveis Categóricas
+dim2_cat = variaveis_categoricas$contrib[, "Dim.2", drop = FALSE] |>
+           as.data.frame() |>
+           rownames_to_column(var = "Variável") |>
+           rename(Contribuição = Dim.2)
+
+# Combinar as duas tabelas para a Dimensão 2
+tabela_dim2 = bind_rows(dim1_cont, dim1_cat) |>
+              arrange(desc(Contribuição)) |>
+              mutate(Contribuição_Acumulada = cumsum(Contribuição))
+
+print(tabela_dim2)
+```
+
+:::
+
+
+## modelos
+
+::: {#logit .panel-tabset}
+
+### logit dim
+
+```{r}
+# Extrair as coordenadas dos indivíduos
+individuos_resultado = get_famd_ind(resultado_famd)
+
+# Criar um dataframe com as coordenadas e a variável de interesse
+dados_modelo = data.frame(
+  tranportador_atrasou = atraso.carreg.transp$transp_atrasou,
+  individuos_resultado$coord
+)
+
+# Ajustar o modelo logístico as dimensões
+modelo_logit_dim = glm(tranportador_atrasou ~ ., data = dados_modelo, family = binomial)
+
+# Exibir o resumo do modelo
+summary(modelo_logit_dim)
+```
+
+
+```{r}
+# Calcular Odds Ratios (Razões de Chances)
+odds_ratios_dim = exp(coef(modelo_logit_dim))
+print(odds_ratios_dim)
+```
+
+### logit var
+
+```{r}
+# Ajustar o modelo logístico as variaveis relevantes das dimensões
+modelo_logit_var = glm(transp_atrasou ~ CLIENTE + PALLETS + troca_ordem + troc_h_carga +
+                       troc_h_descarga + troc_recurso + recurso_extra + 
+                       possui_prioridade + numero_acessos + numero_de_macros + 
+                       numero_manutencao + ultimo_odometro_dia + GR_JORNADA + CIDADE_OPERACO +
+                       OPERACAO + IDADE_CAVALO + IDADE_CARRETA + numero_paradas_proibidas +
+                       interestado + VIAG_VALOR_CARGA + VIAG_PESO_TOTAL + VIAG_DISTANCIA +
+                       numero_paradas.rast, numero_paradas.gris, 
+                   data = atraso.carreg.transp, family = binomial)
+
+# Exibir o resumo do modelo
+summary(modelo_logit_var)
+```
+
+```{r}
+# Calcular Odds Ratios (Razões de Chances)
+odds_ratios_var = exp(coef(modelo_logit_var))
+print(odds_ratios_var)
+```
+
+
+
+
+
+
+:::
+
+
+# comparar
+
+::: {#comparar .panel-tabset}
+
+
+## ridge
+
+```{r}
+# Definir a matriz de variáveis explicativas (X) e a variável resposta (y)
+X <- model.matrix(transp_atrasou ~ CLIENTE + PALLETS + troca_ordem + troc_h_carga +
+                    troc_h_descarga + troc_recurso + recurso_extra +
+                    possui_prioridade + numero_acessos + numero_de_macros +
+                    numero_manutencao + ultimo_odometro_dia + GR_JORNADA + CIDADE_OPERACO +
+                    OPERACAO + IDADE_CAVALO + IDADE_CARRETA + numero_paradas_proibidas +
+                    interestado + VIAG_VALOR_CARGA + VIAG_PESO_TOTAL + VIAG_DISTANCIA +
+                    numero_paradas.rast + numero_paradas.gris, data = atraso.carreg.transp)[,-1]
+
+y <- atraso.carreg.transp$transp_atrasou
+
+# Ajustar o modelo com regularização
+set.seed(123)
+modelo_logit_ridge <- cv.glmnet(X, y, family = "binomial", alpha = 0)  # alpha = 0 para ridge
+
+# Visualizar os coeficientes
+coef(modelo_logit_ridge)
+```
+
+
+
+## outro
+
+```{r}
+# Definir os parâmetros para a validação cruzada, incluindo a separação da amostra em treino (80%) e teste (20%)
+set.seed(123)
+train_control <- trainControl(method = "cv", number = 5, p = 0.8)
+
+# Ajustar o modelo logístico com validação cruzada
+set.seed(123)
+modelo_logit_cv <- train(
+  transp_atrasou ~ CLIENTE + PALLETS + troca_ordem + troc_h_carga +
+    troc_h_descarga + troc_recurso + recurso_extra +
+    possui_prioridade + numero_acessos + numero_de_macros +
+    numero_manutencao + ultimo_odometro_dia + GR_JORNADA + CIDADE_OPERACO +
+    OPERACAO + IDADE_CAVALO + IDADE_CARRETA + numero_paradas_proibidas +
+    interestado + VIAG_VALOR_CARGA + VIAG_PESO_TOTAL + VIAG_DISTANCIA +
+    numero_paradas.rast + numero_paradas.gris,
+  data = atraso.carreg.transp,
+  method = "glm",
+  family = binomial,
+  trControl = train_control
+)
+
+
+# Ajustar o modelo BART usando o pacote dbarts
+set.seed(123)
+modelo_bart_cv <- bart(
+  x.train = dados_treino[, c("CLIENTE", "PALLETS", "troca_ordem", "troc_h_carga", 
+                             "troc_h_descarga", "troc_recurso", "recurso_extra", 
+                             "possui_prioridade", "numero_acessos", "numero_de_macros", 
+                             "numero_manutencao", "ultimo_odometro_dia", "GR_JORNADA", "CIDADE_OPERACO",
+                             "OPERACAO", "IDADE_CAVALO", "IDADE_CARRETA", "numero_paradas_proibidas", 
+                             "interestado", "VIAG_VALOR_CARGA", "VIAG_PESO_TOTAL", "VIAG_DISTANCIA", 
+                             "numero_paradas.rast", "numero_paradas.gris")],
+  y.train = dados_treino$transp_atrasou,
+  keeptrees = TRUE,
+  ntree = 1000
+)
+
+# Previsões do modelo logístico com a base de teste
+pred_logit_teste <- predict(modelo_logit_cv, dados_teste, type = "prob")[,2]
+
+# Previsões do modelo BART com a base de teste
+pred_bart_teste <- colMeans(predict(modelo_bart_cv, newdata = dados_teste))
+
+# Garantir que pred_bart_teste seja um vetor numérico
+pred_bart_teste <- as.vector(pred_bart_teste)
+
+# Verificar se os comprimentos dos vetores são iguais
+print(paste("Comprimento de dados_teste$transp_atrasou: ", length(dados_teste$transp_atrasou)))
+print(paste("Comprimento de pred_bart_teste: ", length(pred_bart_teste)))
+if (length(dados_teste$transp_atrasou) != length(pred_bart_teste)) {
+  stop("Os comprimentos de 'dados_teste$transp_atrasou' e 'pred_bart_teste' não são iguais. Verifique os dados de entrada e as previsões.")
+}
+
+# Cálculo da AUC para o modelo logístico
+grafico_roc_logit_teste <- roc(dados_teste$transp_atrasou, pred_logit_teste)
+auc_logit_teste <- auc(grafico_roc_logit_teste)
+print(paste("AUC do Modelo Logístico com a Base de Teste: ", auc_logit_teste))
+
+# Cálculo da AUC para o modelo BART
+grafico_roc_bart_teste <- roc(dados_teste$transp_atrasou, pred_bart_teste)
+auc_bart_teste <- auc(grafico_roc_bart_teste)
+print(paste("AUC do Modelo BART com a Base de Teste: ", auc_bart_teste))
+
+# Comparar as AUCs dos modelos
+if (auc_bart_teste > auc_logit_teste) {
+  print("O modelo BART teve melhor desempenho do que o modelo logístico.")
+} else {
+  print("O modelo logístico teve melhor desempenho do que o modelo BART.")
+}
+
+
+```
+
+
+:::

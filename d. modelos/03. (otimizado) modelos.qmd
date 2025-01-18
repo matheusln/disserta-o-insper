@@ -1,0 +1,1344 @@
+---
+title: "03. (otimizado) modelos"
+author: "Matheus Lazzari Nicola"
+format: 
+  html:
+    math: mathjax
+    code-fold: true
+    code-summary: "mostre-me o código"
+    embed-resources: true
+    df-print: paged 
+    toc: true
+    toc-depth: 2
+    toc-location: left
+    toc-title: sumário executivo
+    grid:
+      sidebar-width: 200px
+      body-width: 900px  
+      margin-width: 200px
+      gutter-width: 1.5em
+---
+
+<style>
+  p {
+    text-align: justify;
+  }
+</style>
+
+# pacotes
+
+```{r}
+#| warning: false
+#| echo: false
+
+pkgs<-c("tidyverse", "conflicted", "readxl", "openxlsx", "FactoMineR", "factoextra", "glmnet", "patchwork",
+        "caret",    # Para dividir os dados e avaliar os modelos
+        "nnet",     # Para regressão multinomial e rede neural
+        "dbarts",   # Para o modelo BART
+        "xgboost",     # Para o modelo BART multinomial
+        "Matrix",
+        "pROC",     # Para curvas ROC
+        "neuralnet" # Para rede neural binomial
+        )
+
+new.packages <- pkgs[!(pkgs %in% installed.packages()[,"Package"])]
+
+if(length(new.packages)) install.packages(new.packages)
+
+invisible(lapply(pkgs, library, character.only = TRUE))
+rm(pkgs, new.packages)
+
+conflict_prefer("filter", "dplyr")
+conflict_prefer("lag", "dplyr")
+conflicts_prefer(neuralnet::compute)
+
+```
+
+# base de dados
+
+```{r}
+path.01 = "C:/Users/mathe/OneDrive/4.0 Pós-graduação/4.4b Dissertação Mestrado Profissional/c. exploração de dados/atrasos_processo.RData"
+load(path.01)
+
+inicio.processo = inicio.processo |>
+                  droplevels() |>
+                  mutate(PALLETS = as.numeric(substr(PALLETS, 1, 2)))
+
+todo.processo = todo.processo |>
+                mutate(atrasou = case_when(cenarios == 1 ~ 1, .default = 0), .before = 1) |>
+                droplevels() 
+
+# função para renomear os níveis das variáveis categóricas
+rename_levels <- function(factor_var, prefix = "Category") {
+  levels(factor_var) <- paste0(prefix, seq_along(levels(factor_var)))
+  return(factor_var)
+}
+
+
+original_levels <- levels(todo.processo$CLIENTE)
+new_levels <- paste0("cliente_", seq_along(original_levels))
+
+# Create a lookup table (data frame)
+lookup_table <- data.frame(
+  Original = original_levels,
+  New_Code = new_levels
+)
+
+# View the lookup table
+print(lookup_table)
+
+# Rename the levels using the function
+inicio.processo$CLIENTE <- rename_levels(inicio.processo$CLIENTE, prefix = "cliente_")
+todo.processo$CLIENTE <- rename_levels(todo.processo$CLIENTE, prefix = "cliente_")
+
+rm(path.01, lookup_table, new_levels, original_levels, rename_levels)
+
+
+
+
+
+# Definir as variáveis endógenas (Y)
+endogenas <- c(
+  'tranp_atrasou_carreg', 
+  'cliente_atrasou_carreg', 
+  'atrasou', 
+  'diferenca_agenda_chegada', 
+  'diferenca_agenda_carreg', 
+  'delta_carregamento', 
+  'motorista',
+  'cenarios'
+)
+
+# Definir as variáveis a serem descartadas
+descartadas = c('interestado', 'numero_paradas.gris', 'cliente_monitora', 
+                'ERAS_DESCRICAO', 'delta_inicio_cadastro', 'delta_pinicio_inicio',
+                'delta_pfim_fim', 'intraestado')
+
+# Criar a lista de variáveis exógenas (X) excluindo as variáveis endógenas e as descartadas
+exogenas = setdiff(names(inicio.processo), c(endogenas, descartadas))
+
+
+
+# Criar os data frames Y e X
+Y = inicio.processo[, endogenas]
+X = inicio.processo[, exogenas]
+
+
+# base de dados apenas do início do processo para os modelos logit e multinomial
+dados_logit_ip = inicio.processo[, c('atrasou', names(X))] |> droplevels()
+attr(dados_logit_ip, "na.action") <- NULL
+dados_logit_ip <- unique(dados_logit_ip)
+
+dados_mnomial_ip = inicio.processo[, c('cenarios', names(X))] |> droplevels()
+attr(dados_mnomial_ip, "na.action") <- NULL
+dados_mnomial_ip <- unique(dados_mnomial_ip)
+
+
+## repetir o processo para os dados de todo processo
+
+# Definir as variáveis endógenas (Y)
+endogenas <- c(
+  'tranp_atrasou_carreg',
+  'tranp_atrasou_descarreg',
+  'cliente_atrasou_carreg',
+  'cliente_atrasou_descarreg',
+  'atrasou', 
+  'cliente_atrasou',
+  'transp_atrasou',
+  'diferenca_agenda_chegada',
+  'diferenca_agenda_descarreg',
+  'delta_descarregamento',
+  'diferenca_agenda_carreg', 
+  'delta_carregamento', 
+  'delta_fim_inicio',
+  'motorista',
+  'cenarios'
+)
+
+# Definir as variáveis a serem descartadas
+descartadas = c('interestado', 'numero_paradas.gris', 'cliente_monitora', 
+                'ERAS_DESCRICAO', 'delta_inicio_cadastro', 'delta_pinicio_inicio',
+                'delta_pfim_fim', 'intraestado', 'parado_ou_viagem')
+
+# Criar a lista de variáveis exógenas (X) excluindo as variáveis endógenas e as descartadas
+exogenas = setdiff(names(todo.processo), c(endogenas, descartadas))
+
+
+# Criar os data frames Y e X
+Y = todo.processo[, endogenas]
+X = todo.processo[, exogenas]
+
+
+# base de dados de todo o processo para os modelos logit e multinomial
+dados_logit_tp = todo.processo[, c('atrasou', names(X))] |> droplevels()
+attr(dados_logit_tp, "na.action") <- NULL
+dados_logit_tp <- unique(dados_logit_tp) |>
+                  mutate(atrasou = as.factor(atrasou)) |>
+                  select(-c(isca, retorno))
+
+dados_mnomial_tp = todo.processo[, c('cenarios', names(X))] |> droplevels()
+attr(dados_mnomial_tp, "na.action") <- NULL
+dados_mnomial_tp <- unique(dados_mnomial_tp) |>
+                    select(-c(isca, retorno))
+
+
+
+
+
+rm(endogenas, descartadas, exogenas, X, Y)
+```
+
+# exploração de dados
+
+## bd inicio processo
+
+
+
+
+### Análise de Fatores de Dados Mistos (FAMD)
+
+FAMD é um método de componentes principais dedicado a explorar dados com variáveis tanto contínuas quanto categóricas. Pode ser visto, de forma simplificada, como uma mistura entre PCA (Análise de Componentes Principais) e MCA (Análise de Correspondência Múltipla). Mais precisamente, as variáveis contínuas são escaladas para variância unitária, e as variáveis categóricas são transformadas em uma tabela de dados disjuntivos (codificação crisp) e, em seguida, escaladas usando a escala específica do MCA. Isso garante o equilíbrio da influência de ambas as variáveis contínuas e categóricas na análise. Isso significa que ambos os tipos de variáveis estão em igualdade de condições para determinar as dimensões de variabilidade. Este método permite estudar as similaridades entre indivíduos, levando em conta variáveis mistas, e analisar as relações entre todas as variáveis. Também fornece resultados gráficos, como a representação dos indivíduos, o círculo de correlação para as variáveis contínuas e representações das categorias das variáveis categóricas, além de gráficos específicos para visualizar as associações entre ambos os tipos de variáveis.
+
+HUSSON, François; JOSSE, Julie; LE, Sébastien; MAZET, Jeremy. FactoMineR: Multivariate Exploratory Data Analysis and Data Mining. Versão 2.11. R Package. Disponível em: http://factominer.free.fr. Acesso em: 4 out. 2024.
+
+Na função FAMD (Factor Analysis for Mixed Data) do pacote FactoMineR, a variável *sup.var* é um vetor que indica os índices das variáveis suplementares. Essas variáveis suplementares não participam diretamente na construção dos eixos principais, mas são projetadas posteriormente no espaço fatoral criado pelas variáveis ativas.
+
+::: {#famd .panel-tabset}
+#### Variância Explicada
+
+OS gráficos abaixo ajudam a entender a quantidade de variância explicada por cada tipo de variável e permitem decidir quantos componentes usar em análises posteriores, dependendo do nível de explicação de variância desejado.
+
+```{r}
+#| fig.width: 10
+#| fig.height: 10
+
+
+# Identificar variáveis quantitativas (numéricas) e qualitativas (fatores)
+quanti_vars = sapply(dados_logit_ip, is.numeric)
+quali_vars  = !quanti_vars
+
+# Excluir a variável suplementar (por exemplo, a primeira coluna) das listas
+sup_var = 1  # Índice da variável suplementar
+quanti_vars[sup_var] = FALSE
+quali_vars[sup_var] = FALSE
+
+# Criar data frames separados, incluindo a variável suplementar
+dados_all = dados_logit_ip[,-1]  # Todas as variáveis
+dados_quanti = dados_logit_ip[, c(which(quanti_vars))]
+dados_quali = dados_logit_ip[, c(which(quali_vars))]
+
+# Executar FAMD em todas as variáveis
+famd_result = FAMD(dados_all, ncp = 20, graph = FALSE)
+# Executar PCA nas variáveis quantitativas
+pca_result = PCA(dados_quanti, ncp = 20, graph = FALSE)
+# Executar MCA nas variáveis qualitativas
+mca_result = MCA(dados_quali, ncp = 20, graph = FALSE)
+
+
+
+
+# Definir a função para criar o gráfico de variância explicada
+plot_variance_explained <- function(modelo, title_text) {
+  # Calcular a variância explicada e a variância acumulada
+  explained_variance <- modelo$eig[, 2]
+  cumulative_variance <- cumsum(explained_variance)
+  
+  # Criar o data frame para o plot
+  df_variance <- data.frame(
+    Component = 1:length(explained_variance), 
+    Explained = explained_variance, 
+    Cumulative = cumulative_variance
+  )
+  
+  # Criar o gráfico
+  p <- ggplot(data = df_variance, aes(x = Component)) +
+    geom_bar(aes(y = Explained), stat = "identity", fill = "#4285F4", alpha = 0.7, color = "#4285F4") + # Barras azuis
+    geom_line(aes(y = Cumulative), color = "#EA4335", linewidth = 1) + # Linha vermelha
+    geom_point(aes(y = Cumulative), color = "#EA4335", size = 2) + # Pontos vermelhos
+    geom_text(aes(y = Explained, label = round(Explained, 1)), vjust = -0.5, size = 3) + # Rótulos das barras
+    geom_text(aes(y = Cumulative, label = round(Cumulative, 1)), vjust = -1, size = 3, color = "#EA4335") + # Rótulos da linha acumulada
+    scale_y_continuous(sec.axis = sec_axis(~., name = "Variância Acumulada (%)")) +
+    scale_x_continuous(breaks = 1:length(explained_variance)) +
+    labs(
+      title = title_text,
+      x = "Componentes Principais",
+      y = "Variância Explicada (%)"
+    ) +
+    theme_minimal() +
+    theme(
+      legend.position = "none",
+      text = element_text(family = "sans"),
+      plot.title = element_text(face = "bold", hjust = 0)
+    )
+  
+  return(p)
+}
+
+
+plot_mca_variance_explained <- function(mca_result, title_text) {
+  # Extrair a variância explicada e a variância acumulada do resultado da MCA
+  explained_variance <- mca_result$eig[, 2]
+  cumulative_variance <- cumsum(explained_variance)
+  
+  # Limitar a visualização aos 20 primeiros componentes
+  max_components <- 20
+  explained_variance <- explained_variance[1:max_components]
+  cumulative_variance <- cumulative_variance[1:max_components]
+  
+  # Criar o data frame para o plot
+  df_variance <- data.frame(
+    Component = 1:max_components, 
+    Explained = explained_variance, 
+    Cumulative = cumulative_variance
+  )
+  
+  # Criar o gráfico
+  p <- ggplot(data = df_variance, aes(x = Component)) +
+    geom_bar(aes(y = Explained), stat = "identity", fill = "#4285F4", alpha = 0.7, color = "#4285F4") + # Barras azuis
+    geom_line(aes(y = Cumulative), color = "#EA4335", linewidth = 1, linetype = "dashed") + # Linha vermelha pontilhada
+    geom_point(aes(y = Cumulative), color = "#EA4335", size = 2) + # Pontos vermelhos
+    geom_text(aes(y = Explained, label = ifelse(Explained > 5, round(Explained, 1), "")), vjust = -0.5, size = 3) + # Rótulos das barras
+    geom_text(aes(y = Cumulative, label = ifelse(Component %% 5 == 0, round(Cumulative, 1), "")), vjust = -1, size = 3, color = "#EA4335") + # Rótulos da linha acumulada
+    scale_y_continuous(limits = c(0, 100), sec.axis = sec_axis(~., name = "Variância Acumulada (%)")) +
+    scale_x_continuous(breaks = 1:max_components) +
+    labs(
+      title = title_text,
+      x = "Componentes Principais",
+      y = "Variância Explicada (%)"
+    ) +
+    theme_minimal() +
+    theme(
+      legend.position = "none",
+      text = element_text(family = "sans"),
+      plot.title = element_text(face = "bold", hjust = 0),
+      axis.text.x = element_text(angle = 0, hjust = 1)
+    )
+  
+  return(p)
+}
+
+
+# Gerar os gráficos para cada análise
+p_famd = plot_variance_explained(famd_result, "(a) todas as variáveis")
+p_quanti = plot_variance_explained(pca_result, "(b) variáveis quantitativas")
+p_quali = plot_mca_variance_explained(mca_result, "(c) variáveis qualitativas")
+
+# Dispor os gráficos lado a lado usando o patchwork
+combined_plot = p_famd + p_quanti + p_quali + plot_layout(ncol = 1)
+
+# Exibir o gráfico combinado
+print(combined_plot)
+```
+
+Gráfico (a): Todas as Variáveis
+
+-   Este gráfico exibe a variância explicada e a variância acumulada para cada componente principal resultante da FAMD (Análise de Fatores para Dados Mistos), considerando todas as variáveis (quantitativas e qualitativas) do conjunto de dados.
+
+-   O eixo vertical à esquerda mostra a variância explicada em porcentagem para cada componente individual, representada pelas barras azuis.
+
+-   A linha vermelha indica a variância acumulada. À medida que avançamos para componentes adicionais, essa linha se aproxima de 100%, o que significa que mais variância total dos dados está sendo capturada.
+
+-   A variância explicada pelos primeiros componentes é relativamente baixa (4,2% para o primeiro componente), e mesmo ao somar os primeiros 20 componentes, alcançamos apenas 30,7% de variância explicada acumulada.
+
+-   Isso indica que o conjunto de dados possui uma estrutura complexa e exige mais componentes para capturar a variabilidade total.
+
+Gráfico (b): Variáveis Quantitativas
+
+-   Este gráfico representa os componentes principais resultantes de uma PCA (Análise de Componentes Principais) apenas para as variáveis quantitativas.
+
+-   Aqui, a variância explicada pelo primeiro componente é significativamente maior, com 20,5%, e a variância acumulada cresce rapidamente, em relação ao gráfico (a).
+
+-   Com apenas cinco componentes, mais de 50% da variância total das variáveis quantitativas é explicada, e com 12 componentes, alcança-se aproximadamente 100% de variância explicada.
+
+-   Isso indica que as variáveis quantitativas possuem uma estrutura mais compacta e que menos componentes são necessários para descrever adequadamente a variância.
+
+Gráfico (c): Variáveis Qualitativas
+
+-   Este gráfico representa os componentes principais resultantes de uma MCA (Análise de Correspondência Múltipla) considerando apenas as variáveis qualitativas.
+
+-   A variância explicada pelos componentes qualitativos é muito baixa (2,5% para o primeiro componente), e a variância acumulada cresce de forma muito lenta, atingindo apenas 31,3% ao final dos 20 componentes.
+
+-   Esse comportamento é esperado para dados qualitativos, já que as categorias dessas variáveis podem ser mais dispersas e menos informativas em termos de variância explicada por componente.
+
+#### Contribuição das Variáveis
+
+```{r}
+#| fig.width: 10
+#| fig.height: 20
+
+p_quanti_contr <- fviz_famd_var(famd_result,
+                          choice = "quanti.var",
+                          repel = TRUE,
+                          col.var = "contrib",
+                          alpha.var = 0.7,
+                          gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+                          ggtheme = theme_minimal()) +
+            labs(
+              title = "(a) contribuição das variáveis quantitativas",
+              x = "Dimensão 1",
+              y = "Dimensão 2",
+              color = "Contribuição"
+            ) +
+            theme(
+              plot.title = element_text(hjust = 0, face = "bold"),
+              legend.position = "bottom",
+              legend.title = element_text(face = "bold")
+            )
+
+
+dados_logit_factor = dados_logit_ip |>
+                     mutate(across(where(is.factor), ~ {
+                       factor(paste(cur_column(), as.character(.), sep = "_"))}))
+
+famd_result_factor = FAMD(dados_logit_factor, graph = FALSE)
+
+p_quali_contr <- fviz_famd_var(famd_result_factor,
+                          choice = "quali.var",
+                          repel = TRUE,
+                          col.var = "contrib",
+                          alpha.var = 0.7,
+                          gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+                          labelsize = 3,
+                          ggtheme = theme_minimal()) +
+            labs(
+              title = "(b) contribuição das variáveis qualitativas",
+              x = "Dimensão 1",
+              y = "Dimensão 2",
+              color = "Contribuição"
+            ) +
+            theme(
+              plot.title = element_text(hjust = 0, face = "bold"),
+              legend.position = "bottom",
+              legend.title = element_text(face = "bold"),
+            )
+
+combined_plot_qq = p_quanti_contr + p_quali_contr + plot_layout(ncol = 1)
+ggsave("fmad_quanti_A.jpg", plot = combined_plot_qq, width = 2480  / 300 , height = 3800  / 300 , dpi = 300 , units = "in")
+print(combined_plot_qq)
+```
+
+Gráfico (a): Contribuição das Variáveis Quantitativas
+
+-   Este gráfico mostra a contribuição das variáveis quantitativas para as duas primeiras dimensões (Dimensão 1 e Dimensão 2).
+
+-   Cada vetor representa uma variável quantitativa, com a direção e o comprimento do vetor indicando a contribuição e a importância da variável para as dimensões principais.
+
+-   As variáveis mais próximas da borda do círculo, como numero_acessos, numero_de_macros, VIAG_VALOR_CARGA, e VIAG_DISTANCIA, contribuem mais para a variabilidade explicada nas primeiras duas dimensões.
+
+-   A coloração dos vetores indica o nível de contribuição de cada variável (com tons mais próximos do vermelho significando maior contribuição). Isso é útil para identificar quais variáveis são mais influentes nas dimensões principais.
+
+Por exemplo, as variáveis VIAG_VALOR_CARGA e VIAG_DISTANCIA têm uma alta contribuição para a Dimensão 1, sugerindo que variáveis relacionadas ao valor e distância das viagens são relevantes para descrever a variabilidade no conjunto de dados.
+
+Gráfico (b): Contribuição das Variáveis Qualitativas
+
+-   Este gráfico mostra a contribuição das variáveis qualitativas para as mesmas duas dimensões.
+
+-   Cada ponto representa uma categoria de uma variável qualitativa (por exemplo, OPERACAO_DEDICADO, CLIENTE_HEINEKEN, rota_agrupada_PR-GO), e a coloração representa o nível de contribuição da categoria.
+
+-   Categorias que estão mais distantes da origem e mais próximas das bordas, como OPERACAO_DEDICADO, CLIENTE_HEINEKEN e rota_agrupada_PR-GO, têm uma contribuição maior para as dimensões. A escala de cores novamente indica a contribuição, com tons mais quentes (próximos ao laranja/vermelho) representando contribuições mais altas.
+
+As categorias como OPERACAO_DEDICADO e CLIENTE_HEINEKEN contribuem significativamente para as dimensões principais, o que pode indicar que certos clientes e operações específicas influenciam a variabilidade do conjunto de dados.
+
+#### Variáveis Relevantes
+
+Os gráficos abaixo mostram a contribuição de cada variável que maximizam a explicação da variância pelos cinco primeiros componentes pricipais de cada técnica utilizada (FMDA, PCA e MCA).
+
+```{r}
+#| fig.width: 10
+#| fig.height: 12
+
+
+# Definir ajustes de tema comuns
+common_theme <- theme_minimal() +
+  theme(
+    legend.position = "none",
+    text = element_text(family = "sans", size = 12),
+    plot.title = element_text(face = "bold", hjust = 0, size = 14),
+    axis.title = element_text(size = 12),
+    axis.text.x = element_text(angle = 90, hjust = 1, size = 8),
+    axis.text.y = element_text(size = 10)
+  )
+
+# ---- c_famd ----
+# Extrair dados do gráfico c_famd
+data_famd <- fviz_contrib(
+  famd_result,
+  choice = "var",
+  axes = 1:5,
+  top = 20
+)$data
+
+# Reordenar níveis de 'name'
+data_famd$name <- factor(data_famd$name, levels = data_famd$name[order(data_famd$contrib, decreasing = TRUE)])
+
+# Calcular contribuição média esperada
+n_variables <- nrow(data_famd)
+mean_contrib <- 100 / n_variables
+
+# Criar o gráfico c_famd
+c_famd <- ggplot(data_famd, aes(x = name, y = contrib)) +
+  geom_bar(stat = "identity", fill = "#4285F4", color = "#4285F4", alpha = 0.7) +
+  geom_hline(yintercept = mean_contrib, linetype = "dashed", color = "#FC4E07") +
+  geom_text(aes(label = ifelse(contrib > mean_contrib, round(contrib, 1), "")),
+            vjust = -0.5, size = 3) +
+  labs(
+    title = "(a) contribuição considerando todas variáveis (FAMD)",
+    x = "Variáveis",
+    y = "Contribuição (%)"
+  ) +
+  common_theme
+
+# ---- c_pca ----
+# Extrair dados do gráfico c_pca
+data_pca <- fviz_contrib(
+  pca_result,
+  choice = "var",
+  axes = 1:5,
+  top = 20
+)$data
+
+# Reordenar níveis de 'name'
+data_pca$name <- factor(data_pca$name, levels = data_pca$name[order(data_pca$contrib, decreasing = TRUE)])
+
+# Calcular contribuição média esperada
+n_variables_pca <- nrow(data_pca)
+mean_contrib_pca <- 100 / n_variables_pca
+
+# Criar o gráfico c_pca
+c_pca <- ggplot(data_pca, aes(x = name, y = contrib)) +
+  geom_bar(stat = "identity", fill = "#4285F4", color = "#4285F4", alpha = 0.7) +
+  geom_hline(yintercept = mean_contrib_pca, linetype = "dashed", color = "#FC4E07") +
+  geom_text(aes(label = ifelse(contrib > mean_contrib_pca, round(contrib, 1), "")),
+            vjust = -0.5, size = 3) +
+  labs(
+    title = "(b) contribuição das variáveis quantitativas (PCA)",
+    x = "Variáveis",
+    y = "Contribuição (%)"
+  ) +
+  common_theme
+
+# ---- c_mca ----
+# Extrair dados do gráfico c_mca
+data_mca <- fviz_contrib(
+  mca_result,
+  choice = "var",
+  axes = 1:5,
+  top = 20
+)$data
+
+# Reordenar níveis de 'name'
+data_mca$name <- factor(data_mca$name, levels = data_mca$name[order(data_mca$contrib, decreasing = TRUE)])
+
+# Calcular contribuição média esperada
+n_variables_mca <- nrow(data_mca)
+mean_contrib_mca <- 100 / n_variables_mca
+
+# Criar o gráfico c_mca
+c_mca <- ggplot(data_mca, aes(x = name, y = contrib)) +
+  geom_bar(stat = "identity", fill = "#4285F4", color = "#4285F4", alpha = 0.7) +
+  geom_hline(yintercept = mean_contrib_mca, linetype = "dashed", color = "#FC4E07") +
+  geom_text(aes(label = ifelse(contrib > mean_contrib_mca, round(contrib, 1), "")), 
+            vjust = -0.5, size = 2) +
+  labs(
+    title = "(c) contribuição das variáveis qualitativas (MCA)",
+    x = "Variáveis",
+    y = "Contribuição (%)"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    text = element_text(family = "sans", size = 12),
+    plot.title = element_text(face = "bold", hjust = 0, size = 14),
+    axis.title = element_text(size = 12),
+    axis.text.x = element_text(angle = 90, hjust = 1, size = 6),
+    axis.text.y = element_text(size = 10)
+  )
+
+combined_plot_c = c_famd + c_pca + c_mca + plot_layout(ncol = 1, heights = c(1, 1, 1), guides = "collect")
+
+# Exibir o gráfico combinado
+ggsave("fmad_quanti_b.jpg", plot = combined_plot_c, width = 2480  / 300 , height = 3800  / 300 , dpi = 300 , units = "in")
+
+print(combined_plot_c)
+```
+
+No gráfico acima, são apresentadas as contribuições de cada técnica de Análise de Componentes Principais (FAMD, PCA e MCA). As barras indicam a contribuição percentual de cada variável para as principais dimensões (neste caso, as cinco primeiras), que capturam a variação nos dados de diferentes tipos: dados mistos para a FAMD, dados quantitativos para a PCA e dados qualitativos para a MCA.
+:::
+
+# Redução de Dimensionalidade
+
+O objetivo do pacote glmnet é fornecer ferramentas para ajuste de modelos lineares generalizados com regularização, particularmente utilizando as penalizações Lasso, Ridge e Elastic Net. Ele é projetado para modelagem estatística onde a seleção de variáveis e a regularização são essenciais, principalmente em conjuntos de dados de alta dimensionalidade. O pacote facilita a construção de modelos preditivos robustos que evitam o overfitting ao penalizar coeficientes de variáveis menos relevantes, permitindo que o modelo se concentre nas características mais importantes.
+
+FRIEDMAN, Jerome; HASTIE, Trevor; TIBSHIRANI, Rob; NARASIMHAN, Balasubramanian; TAY, Kenneth; SIMON, Noah. glmnet: Lasso and Elastic-Net Regularized Generalized Linear Models. R package version, 2023. Disponível em: https://cran.r-project.org/package=glmnet. Acesso em: 19 out. 2024.
+
+::: {#glmnet .panel-tabset}
+## sp logit
+
+**Lasso**: Ideal para reduzir a dimensionalidade, selecionando apenas as variáveis mais relevantes. Útil em situações de esparsidade, onde se espera que apenas algumas variáveis tenham impacto significativo.
+
+**Ridge**: Recomendado para cenários com muitas variáveis correlacionadas, onde todas são consideradas relevantes. Mantém todas as variáveis no modelo, mas reduz seus efeitos para evitar overfitting.
+
+**Elastic Net**: Útil para dados com muitas variáveis correlacionadas e onde uma combinação de seleção e regularização é desejável. É um bom "meio-termo" entre Lasso e Ridge, adaptando-se bem a uma variedade de cenários.
+
+```{r}
+# Preparar dados
+X = model.matrix(atrasou ~ . -1, data = dados_logit_ip)  # Matriz de preditores
+y = dados_logit_ip$atrasou                               # Variável resposta
+
+# Validação cruzada para escolher o melhor lambda
+modelo_elastic_ip = cv.glmnet(X, y, family = "binomial", 
+                           alpha = 0.5,
+                           maxit = 100000,
+                           standardize = TRUE,
+                           type.measure = "mse",
+                           keep = TRUE)
+
+#rocs <-roc.glmnet(modelo_elastic$fit.preval,newy = y)
+
+#best = modelo_elastic$index["min",]
+#plot(rocs[[best]], type ="l")
+#invisible(sapply(rocs,lines,col="grey"))
+#lines(rocs[[best]],lwd =2,col ="red")
+
+#Extrair o melhor lambda
+best_lambda = modelo_elastic_ip$lambda.min
+
+# Ajustar modelo final com o lambda ótimo
+modelo_logit = glmnet(X, y, alpha = 0.5, 
+                      family = "binomial", 
+                      lambda = best_lambda, 
+                      maxit = 100000,
+                      standardize = TRUE,
+                      thresh = 1e-6,
+                      type.logistic = "modified.Newton",
+                      strong = TRUE)
+
+coeficientes <- coef(modelo_logit)
+print(coeficientes)
+
+```
+
+
+```{r}
+X = model.matrix(atrasou ~ . -1, data = dados_logit_tp)  # Matriz de preditores
+y = dados_logit_tp$atrasou                               # Variável resposta
+
+# Validação cruzada para escolher o melhor lambda
+modelo_elastic_tp = cv.glmnet(X, y, family = "binomial", 
+                           alpha = 0.5,
+                           maxit = 100000,
+                           standardize = TRUE,
+                           type.measure = "mse",
+                           keep = TRUE)
+
+#rocs <-roc.glmnet(modelo_elastic$fit.preval,newy = y)
+
+#best = modelo_elastic$index["min",]
+#plot(rocs[[best]], type ="l")
+#invisible(sapply(rocs,lines,col="grey"))
+#lines(rocs[[best]],lwd =2,col ="red")
+
+#Extrair o melhor lambda
+best_lambda = modelo_elastic_tp$lambda.min
+
+# Ajustar modelo final com o lambda ótimo
+modelo_logit = glmnet(X, y, alpha = 0.5, 
+                      family = "binomial", 
+                      lambda = best_lambda, 
+                      maxit = 100000,
+                      standardize = TRUE,
+                      thresh = 1e-6,
+                      type.logistic = "modified.Newton",
+                      strong = TRUE)
+
+coeficientes <- coef(modelo_logit)
+print(coeficientes)
+```
+
+
+
+```{r}
+#| fig.width: 10
+#| fig.height: 12
+
+
+# Extrair coeficientes como matriz comum
+coefs <- as.matrix(coef(modelo_logit))
+
+# Converter para um data.frame, mantendo nomes das variáveis
+coefs_df <- data.frame(
+  variavel = rownames(coefs),
+  coeficiente = coefs[, 1],
+  stringsAsFactors = FALSE
+)
+
+# Remover a interceptação (geralmente está no primeiro coeficiente)
+coefs_df <- coefs_df[coefs_df$variavel != "(Intercept)", ]
+
+# Filtrar apenas coeficientes não nulos
+coefs_df_nonzero <- coefs_df[coefs_df$coeficiente != 0, ]
+
+# Ordenar pelo valor absoluto do coeficiente (do maior para o menor)
+coefs_df_nonzero <- coefs_df_nonzero[order(abs(coefs_df_nonzero$coeficiente), decreasing = TRUE), ]
+
+
+# Criar o gráfico de barras horizontais
+coefs_df_nonzero <- coefs_df_nonzero %>%
+  mutate(Sinal = ifelse(coeficiente >= 0, "Positivo", "Negativo"))
+
+ps = coefs_df_nonzero |>
+  ggplot(aes(x = reorder(variavel, coeficiente, function(x) abs(x)), 
+             y = coeficiente, fill = Sinal)) + 
+  geom_bar(stat = "identity", width = 0.6, alpha = 0.8) + 
+  coord_flip() +
+  theme_minimal(base_size = 10) +
+  labs(
+    #title = "Coeficientes Não Nulos do Modelo",
+    x = NULL,
+    y = "Coeficiente",
+    fill = "Sinal do Coeficiente"
+  ) +
+  scale_fill_manual(
+    values = c("Negativo" = "#E69F00", "Positivo" = "#56B4E9"), # Cores semelhantes às do exemplo
+    labels = c("Negativo", "Positivo")
+  ) +
+  theme(
+    legend.position = "bottom",       # Legenda abaixo do gráfico
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 8),
+    legend.box.margin = margin(t = 8, b = 8),
+    legend.justification = "left",
+    plot.title = element_text(hjust = 0, size = 12, face = "bold", margin = margin(b = 10)), 
+    axis.text.y = element_text(size = 10, margin = margin(r = 10)) # Espaçamento entre os itens do eixo Y
+  ) +
+  guides(
+    fill = guide_legend(
+      override.aes = list(width = 0.3, alpha = 1), # Mantém o tamanho dos retângulos na legenda menores
+      keywidth = 1.5, 
+      keyheight = 1
+    )
+  )
+print(ps)
+ggsave("esparcidade.jpg", plot = ps, width = 2480  / 300 , height = 3800  / 300 , dpi = 300 , units = "in")
+```
+## sp multinominal
+
+**Lasso**: Ideal para reduzir a dimensionalidade, selecionando apenas as variáveis mais relevantes. Útil em situações de esparsidade, onde se espera que apenas algumas variáveis tenham impacto significativo.
+
+**Ridge**: Recomendado para cenários com muitas variáveis correlacionadas, onde todas são consideradas relevantes. Mantém todas as variáveis no modelo, mas reduz seus efeitos para evitar overfitting.
+
+**Elastic Net**: Útil para dados com muitas variáveis correlacionadas e onde uma combinação de seleção e regularização é desejável. É um bom "meio-termo" entre Lasso e Ridge, adaptando-se bem a uma variedade de cenários.
+
+```{r}
+# Preparar dados
+X = model.matrix(cenarios ~ . -1, data = dados_mnomial_ip)  # Matriz de preditores
+y = dados_mnomial_ip$cenarios                               # Variável resposta
+
+# Validação cruzada para escolher o melhor lambda
+modelo_elastic_mip = cv.glmnet(X, y, family = "multinomial", 
+                           alpha = 0.5,
+                           maxit = 100000,
+                           standardize = TRUE,
+                           type.measure = "mse",
+                           keep = TRUE)
+
+#rocs <-roc.glmnet(modelo_elastic$fit.preval,newy = y)
+
+#best = modelo_elastic$index["min",]
+#plot(rocs[[best]], type ="l")
+#invisible(sapply(rocs,lines,col="grey"))
+#lines(rocs[[best]],lwd =2,col ="red")
+
+#Extrair o melhor lambda
+best_lambda = modelo_elastic_mip$lambda.1se
+
+# Ajustar modelo final com o lambda ótimo
+modelo_mnomial = glmnet(X, y, alpha = 0.5, 
+                      family = "multinomial", 
+                      lambda = best_lambda, 
+                      maxit = 200000,
+                      standardize = TRUE,
+                      type.logistic = "modified.Newton",
+                      thresh = 1e-1)
+
+coeficientes <- coef(modelo_mnomial)
+print(coeficientes)
+
+```
+
+
+```{r}
+# Preparar dados
+X = model.matrix(cenarios ~ . -1, data = dados_mnomial_tp)  # Matriz de preditores
+y = dados_mnomial_tp$cenarios                               # Variável resposta
+
+# Validação cruzada para escolher o melhor lambda
+modelo_elastic_mtp = cv.glmnet(X, y, family = "multinomial", 
+                           alpha = 0.5,
+                           maxit = 100000,
+                           standardize = TRUE,
+                           type.measure = "mse",
+                           keep = TRUE)
+
+#rocs <-roc.glmnet(modelo_elastic$fit.preval,newy = y)
+
+#best = modelo_elastic$index["min",]
+#plot(rocs[[best]], type ="l")
+#invisible(sapply(rocs,lines,col="grey"))
+#lines(rocs[[best]],lwd =2,col ="red")
+
+#Extrair o melhor lambda
+best_lambda = modelo_elastic_mtp$lambda.1se
+
+# Ajustar modelo final com o lambda ótimo
+modelo_mnomial = glmnet(X, y, alpha = 0.5, 
+                      family = "multinomial", 
+                      lambda = best_lambda, 
+                      maxit = 200000,
+                      standardize = TRUE,
+                      type.logistic = "modified.Newton",
+                      thresh = 1e-1)
+
+coeficientes <- coef(modelo_mnomial)
+print(coeficientes)
+```
+
+## resultados
+
+```{r}
+
+df <- data.frame(
+  lambda = log(modelo_elastic_ip$lambda),
+  mse = modelo_elastic_ip$cvm,
+  se = modelo_elastic_ip$cvsd,
+  n_nonzero = modelo_elastic_ip$nzero
+)
+lambda_min <- log(modelo_elastic_ip$lambda.min)
+lambda_1se <- log(modelo_elastic_ip$lambda.1se)
+
+breaks <- df$lambda[seq(1, nrow(df), by = 2)]
+labels <- df$n_nonzero[seq(1, nrow(df), by = 2)]
+
+# Criar o gráfico de MSE com número de variáveis não nulas no eixo superior
+p1 <- ggplot(df, aes(x = lambda, y = mse)) +
+  geom_point(color = "red") +
+  geom_line(color = "red") +
+  geom_errorbar(aes(ymin = mse - se, ymax = mse + se), color = "gray") +
+  geom_vline(xintercept = lambda_min, linetype = "dashed", color = "blue") +
+  geom_vline(xintercept = lambda_1se, linetype = "dashed", color = "darkgreen") +
+  labs(title = "plot 01 - início do proceso de transporte (binomial)",
+       x = "Log(λ)",
+       y = "Mean Squared Error") +
+  scale_x_continuous(
+    sec.axis = sec_axis(~ ., breaks = breaks, labels = labels, name = "Número de Variáveis Não Nulas")
+  ) +
+  theme_minimal() +
+  theme(axis.text.x.top = element_text(angle = 90, hjust = 0))
+
+
+
+
+df <- data.frame(
+  lambda = log(modelo_elastic_tp$lambda),
+  mse = modelo_elastic_tp$cvm,
+  se = modelo_elastic_tp$cvsd,
+  n_nonzero = modelo_elastic_tp$nzero
+)
+lambda_min <- log(modelo_elastic_tp$lambda.min)
+lambda_1se <- log(modelo_elastic_tp$lambda.1se)
+
+breaks <- df$lambda[seq(1, nrow(df), by = 2)]
+labels <- df$n_nonzero[seq(1, nrow(df), by = 2)]
+
+# Criar o gráfico de MSE com número de variáveis não nulas no eixo superior
+p2 <- ggplot(df, aes(x = lambda, y = mse)) +
+  geom_point(color = "red") +
+  geom_line(color = "red") +
+  geom_errorbar(aes(ymin = mse - se, ymax = mse + se), color = "gray") +
+  geom_vline(xintercept = lambda_min, linetype = "dashed", color = "blue") +
+  geom_vline(xintercept = lambda_1se, linetype = "dashed", color = "darkgreen") +
+  labs(title = "plot 02 - início do proceso de transporte (multinomial)",
+       x = "Log(λ)",
+       y = "Mean Squared Error") +
+  scale_x_continuous(
+    sec.axis = sec_axis(~ ., breaks = breaks, labels = labels, name = "Número de Variáveis Não Nulas")
+  ) +
+  theme_minimal() +
+  theme(axis.text.x.top = element_text(angle = 90, hjust = 0))
+
+
+df <- data.frame(
+  lambda = log(modelo_elastic_mip$lambda),
+  mse = modelo_elastic_mip$cvm,
+  se = modelo_elastic_mip$cvsd,
+  n_nonzero = modelo_elastic_mip$nzero
+)
+lambda_min <- log(modelo_elastic_mip$lambda.min)
+lambda_1se <- log(modelo_elastic_mip$lambda.1se)
+
+breaks <- df$lambda[seq(1, nrow(df), by = 2)]
+labels <- df$n_nonzero[seq(1, nrow(df), by = 2)]
+
+# Criar o gráfico de MSE com número de variáveis não nulas no eixo superior
+p3 <- ggplot(df, aes(x = lambda, y = mse)) +
+  geom_point(color = "red") +
+  geom_line(color = "red") +
+  geom_errorbar(aes(ymin = mse - se, ymax = mse + se), color = "gray") +
+  geom_vline(xintercept = lambda_min, linetype = "dashed", color = "blue") +
+  geom_vline(xintercept = lambda_1se, linetype = "dashed", color = "darkgreen") +
+  labs(title = "plot 03 - todo o proceso de transporte (binomial)",
+       x = "Log(λ)",
+       y = "Mean Squared Error") +
+  scale_x_continuous(
+    sec.axis = sec_axis(~ ., breaks = breaks, labels = labels, name = "Número de Variáveis Não Nulas")
+  ) +
+  theme_minimal() +
+  theme(axis.text.x.top = element_text(angle = 90, hjust = 0))
+
+
+df <- data.frame(
+  lambda = log(modelo_elastic_mtp$lambda),
+  mse = modelo_elastic_mtp$cvm,
+  se = modelo_elastic_mtp$cvsd,
+  n_nonzero = modelo_elastic_mtp$nzero
+)
+lambda_min <- log(modelo_elastic_mtp$lambda.min)
+lambda_1se <- log(modelo_elastic_mtp$lambda.1se)
+
+breaks <- df$lambda[seq(1, nrow(df), by = 2)]
+labels <- df$n_nonzero[seq(1, nrow(df), by = 2)]
+
+# Criar o gráfico de MSE com número de variáveis não nulas no eixo superior
+p4 <- ggplot(df, aes(x = lambda, y = mse)) +
+  geom_point(color = "red") +
+  geom_line(color = "red") +
+  geom_errorbar(aes(ymin = mse - se, ymax = mse + se), color = "gray") +
+  geom_vline(xintercept = lambda_min, linetype = "dashed", color = "blue") +
+  geom_vline(xintercept = lambda_1se, linetype = "dashed", color = "darkgreen") +
+  labs(title = "plot 04 - todo proceso de transporte (multinomial)",
+       x = "Log(λ)",
+       y = "Mean Squared Error") +
+  scale_x_continuous(
+    sec.axis = sec_axis(~ ., breaks = breaks, labels = labels, name = "Número de Variáveis Não Nulas")
+  ) +
+  theme_minimal() +
+  theme(axis.text.x.top = element_text(angle = 90, hjust = 0))
+
+
+linha1 <- p1 + p2 + plot_layout(ncol = 2, widths = c(1, 1))
+linha2 <- p3 + p4 + plot_layout(ncol = 2, widths = c(1, 1))
+
+layout_final <- (linha1 / linha2) + plot_layout(heights = c(1, 1))
+
+
+
+ggsave("sparcity.jpg", plot = layout_final, width = 3800  / 300 , height = 2480  / 300 , dpi = 300 , units = "in")
+
+```
+
+
+
+
+
+```{r}
+#| fig.width: 10
+#| fig.height: 12
+
+
+# Extrair coeficientes para cada classe
+coefs_list <- coef(modelo_mnomial)
+
+# Converter os coeficientes para um data frame combinando todas as classes
+coefs_df <- do.call(rbind, lapply(names(coefs_list), function(class) {
+  coefs <- as.matrix(coefs_list[[class]])
+  data.frame(
+    classe = class,
+    variavel = rownames(coefs),
+    coeficiente = as.numeric(coefs),
+    stringsAsFactors = FALSE
+  )
+}))
+
+# Remover a interceptação
+coefs_df <- coefs_df[coefs_df$variavel != "(Intercept)", ]
+
+# Filtrar apenas coeficientes não nulos
+coefs_df_nonzero <- coefs_df[coefs_df$coeficiente != 0, ]
+
+# Ordenar pelo valor absoluto do coeficiente
+coefs_df_nonzero <- coefs_df_nonzero[order(abs(coefs_df_nonzero$coeficiente), decreasing = TRUE), ]
+
+coefs_df_nonzero <- coefs_df_nonzero %>%
+  mutate(Sinal = ifelse(coeficiente >= 0, "Positivo", "Negativo"))
+
+ps <- coefs_df_nonzero %>%
+  ggplot(aes(x = reorder(variavel, abs(coeficiente)), y = coeficiente, fill = Sinal)) +
+  geom_bar(stat = "identity", width = 0.6, alpha = 0.8) +
+  facet_wrap(~ classe, scales = "free_y") +  # Facetando por classe
+  coord_flip() +
+  theme_minimal(base_size = 10) +
+  labs(
+    x = NULL,
+    y = "Coeficiente",
+    fill = "Sinal do Coeficiente"
+  ) +
+  scale_fill_manual(
+    values = c("Negativo" = "#E69F00", "Positivo" = "#56B4E9"),
+    labels = c("Negativo", "Positivo")
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 8),
+    legend.box.margin = margin(t = 8, b = 8),
+    legend.justification = "left",
+    plot.title = element_text(hjust = 0, size = 12, face = "bold", margin = margin(b = 10)),
+    axis.text.y = element_text(size = 10, margin = margin(r = 10))
+  ) +
+  guides(
+    fill = guide_legend(
+      override.aes = list(width = 0.3, alpha = 1),
+      keywidth = 1.5,
+      keyheight = 1
+    )
+  )
+
+# Imprimir o gráfico
+print(ps)
+
+ggsave("esparcidade_m.jpg", plot = ps, width = 2480  / 300 , height = 3800  / 300 , dpi = 300 , units = "in")
+```
+:::
+
+# Modelos
+
+::: {#modelos .panel-tabset}
+## treino e teste
+
+```{r}
+# Base binária
+dados_logit$atrasou <- as.factor(dados_logit$atrasou)
+levels(dados_logit$atrasou)
+
+# Base multinomial
+dados_mnomial$cenarios <- as.factor(dados_mnomial$cenarios)
+levels(dados_mnomial$cenarios)
+
+# Verificar valores ausentes na base binária
+sum(is.na(dados_logit))
+
+# Verificar valores ausentes na base multinomial
+sum(is.na(dados_mnomial))
+
+# Verificar o balanceamento da variável resposta binária
+table(dados_logit$atrasou)
+
+# Se necessário, balancear os dados de treino binário
+if (min(table(dados_logit$atrasou)) / sum(table(dados_logit$atrasou)) < 0.1) {
+  cat("A variável resposta está desbalanceada. Realizando balanceamento...\n")
+  treinoBin_bal <- upSample(x = dados_logit[, -which(names(dados_logit) == 'atrasou')], y = dados_logit$atrasou)
+  treinoBin <- cbind(treinoBin_bal, atrasou = treinoBin_bal$Class)
+  treinoBin$Class <- NULL
+} else {
+  treinoBin <- dados_logit
+}
+
+# Definir as variáveis preditoras
+
+# Variáveis preditoras para a base binária (excluindo a variável resposta e identificadores não adequados)
+predictors_logit <- setdiff(names(dados_logit), c('atrasou', 'CLIENTE', 'rota_agrupada'))
+
+# Remover variáveis constantes (sem variação)
+predictors_logit <- predictors_logit[sapply(treinoBin[, predictors_logit], function(x) length(unique(x)) > 1)]
+
+# Variáveis preditoras para a base multinomial (excluindo a variável resposta e identificadores não adequados)
+predictors_mnomial <- setdiff(names(dados_mnomial), c('cenarios', 'CLIENTE', 'rota_agrupada'))
+
+# Passo 3: Dividir os dados em conjuntos de treinamento e teste
+set.seed(123)  # Para reprodutibilidade
+
+# Divisão para a base binária
+indiceTreinoBin <- createDataPartition(dados_logit$atrasou, p = 0.7, list = FALSE)
+treinoBin <- dados_logit[indiceTreinoBin, ]
+testeBin <- dados_logit[-indiceTreinoBin, ]
+
+# Ajustar níveis dos fatores no conjunto de teste para que sejam consistentes com o conjunto de treinamento
+for (var in names(treinoBin)) {
+  if (is.factor(treinoBin[[var]])) {
+    levels(testeBin[[var]]) <- levels(treinoBin[[var]])
+  }
+}
+
+# Divisão para a base multinomial
+indiceTreinoMulti <- createDataPartition(dados_mnomial$cenarios, p = 0.7, list = FALSE)
+treinoMulti <- dados_mnomial[indiceTreinoMulti, ]
+testeMulti <- dados_mnomial[-indiceTreinoMulti, ]
+
+# Ajustar níveis dos fatores no conjunto de teste para que sejam consistentes com o conjunto de treinamento
+for (var in names(treinoMulti)) {
+  if (is.factor(treinoMulti[[var]])) {
+    levels(testeMulti[[var]]) <- levels(treinoMulti[[var]])
+  }
+}
+
+```
+
+## Logit
+
+```{r}
+# 1. Regressão Logística Binomial
+formula_logit <- as.formula(paste("atrasou ~", paste(predictors_logit, collapse = " + ")))
+modeloLogistico <- glm(formula_logit, data = treinoBin, family = binomial)
+
+# Avaliar Regressão Logística Binomial
+probPredLogistico <- predict(modeloLogistico, testeBin, type = "response")
+classPredLogistico <- ifelse(probPredLogistico > 0.5, "1", "0")
+confMatLogistico <- confusionMatrix(as.factor(classPredLogistico), as.factor(testeBin$atrasou), dnn = c("Prediction", "Reference"))
+print(confMatLogistico)
+
+```
+
+## M-Nomial
+
+```{r}
+# 2. Regressão Multinomial
+formula_multinom <- as.formula(paste("cenarios ~", paste(predictors_mnomial, collapse = " + ")))
+modeloMultinom <- multinom(formula_multinom, data = treinoMulti)
+
+# Avaliar Regressão Multinomial
+classPredMultinom <- predict(modeloMultinom, testeMulti)
+confMatMultinom <- confusionMatrix(classPredMultinom, testeMulti$cenarios, dnn = c("Prediction", "Reference"))
+print(confMatMultinom)
+```
+
+## BART B
+
+```{r}
+# 3. BART com Variável Endógena Binomial
+x.train.bin <- treinoBin[, predictors_logit]
+y.train.bin <- as.numeric(as.character(treinoBin$atrasou))
+x.test.bin <- testeBin[, predictors_logit]
+
+modeloBARTBin <- dbarts::bart(x.train = x.train.bin,
+                      y.train = y.train.bin,
+                      x.test = x.test.bin,
+                      ntree = 200,
+                      verbose = TRUE)
+
+# Avaliar BART Binomial
+# Calculate the mean of the latent variable predictions
+if (!is.null(modeloBARTBin$yhat.test)) {
+  latentMean <- apply(modeloBARTBin$yhat.test, 2, mean)
+  # Apply the probit link function to get probabilities
+  probPredBARTBin <- pnorm(latentMean)
+  # Convert probabilities to class predictions
+  classPredBARTBin <- factor(ifelse(probPredBARTBin > 0.5, "1", "0"), levels = levels(testeBin$atrasou))
+
+  # Ensure the factor levels match
+  if (all(levels(classPredBARTBin) %in% levels(testeBin$atrasou))) {
+    confMatBARTBin <- confusionMatrix(classPredBARTBin, testeBin$atrasou, dnn = c("Prediction", "Reference"))
+  } else {
+    cat("Aviso: A matriz de confusão não pôde ser calculada porque uma das classes está ausente.\n")
+    confMatBARTBin <- NULL
+  }
+} else {
+  cat("Erro: As probabilidades de teste do modelo BART não foram geradas.\n")
+  confMatBARTBin <- NULL
+}
+
+print(confMatBARTBin)
+
+```
+
+## BART M
+
+```{r}
+# 4. BART com Variável Endógena Multinominal 
+
+# 1. Pré-processamento: Converter variáveis categóricas em variáveis dummy
+dummies <- dummyVars(" ~ .", data = treinoMulti[, predictors_mnomial])
+x_train <- predict(dummies, newdata = treinoMulti)
+x_test <- predict(dummies, newdata = testeMulti)
+
+# Converter para matrizes esparsas
+x_train <- Matrix(x_train, sparse = TRUE)
+x_test <- Matrix(x_test, sparse = TRUE)
+
+# 2. Preparar a variável resposta como numérica (para xgboost)
+y_train <- as.numeric(treinoMulti$cenarios) - 1  # Subtrair 1 para que a primeira classe seja 0
+
+# 3. Configurar parâmetros para o modelo xgboost multinomial
+num_classes <- length(levels(treinoMulti$cenarios))
+params <- list(
+  objective = "multi:softmax",  # Classificação multiclasse
+  num_class = num_classes,      # Número de classes
+  eval_metric = "merror"        # Métrica de erro de classificação
+)
+
+# 4. Treinar o modelo xgboost
+xgb_model <- xgboost(
+  data = x_train,
+  label = y_train,
+  params = params,
+  nrounds = 100,                 # Número de iterações (ajuste conforme necessário)
+  verbose = 1,
+  early_stopping_rounds = 10     # Parada precoce para evitar overfitting
+)
+
+# 5. Fazer previsões no conjunto de teste
+pred_class <- predict(xgb_model, x_test)
+
+# 6. Avaliar o desempenho usando a matriz de confusão
+# Como `pred_class` está em formato numérico, precisamos convertê-lo de volta para rótulos de classe
+class_labels <- levels(treinoMulti$cenarios)
+pred_class_labels <- class_labels[pred_class + 1]  # Adiciona 1 para mapear de volta aos rótulos originais
+
+# Criar a matriz de confusão
+confMatBARTMulti <- table(Predicted = pred_class_labels, Actual = testeMulti$cenarios)
+print(confMatBARTMulti)
+
+# Calcular a acurácia
+accuracy <- sum(diag(confMatBARTMulti)) / sum(confMatBARTMulti)
+print(paste("Acurácia:", round(accuracy, 3)))
+
+
+
+```
+
+## RN B
+
+```{r}
+# 5. Rede Neural com Variável Endógena Binomial
+# Preparar os dados de treinamento
+train_nn_bin <- model.matrix(~ . -1, data = treinoBin[, predictors_logit])
+train_nn_bin <- as.data.frame(train_nn_bin)
+train_nn_bin$atrasou <- as.numeric(as.character(treinoBin$atrasou))
+
+# Escalar os dados (excluindo a variável resposta)
+maxs <- apply(train_nn_bin[, -ncol(train_nn_bin)], 2, max)
+mins <- apply(train_nn_bin[, -ncol(train_nn_bin)], 2, min)
+train_scaled <- scale(train_nn_bin[, -ncol(train_nn_bin)], center = mins, scale = maxs - mins)
+train_scaled <- as.data.frame(train_scaled)
+train_scaled$atrasou <- train_nn_bin$atrasou
+
+# Limpar os nomes das colunas em train_scaled
+names(train_scaled) <- make.names(names(train_scaled))
+
+# Preparar os dados de teste
+test_nn_bin <- model.matrix(~ . -1, data = testeBin[, predictors_logit])
+test_nn_bin <- as.data.frame(test_nn_bin)
+test_nn_bin$atrasou <- as.numeric(as.character(testeBin$atrasou))
+
+# Escalar os dados de teste usando os mesmos parâmetros de escalonamento
+test_scaled <- scale(test_nn_bin[, -ncol(test_nn_bin)], center = mins, scale = maxs - mins)
+test_scaled <- as.data.frame(test_scaled)
+test_scaled$atrasou <- test_nn_bin$atrasou
+
+# Limpar os nomes das colunas em test_scaled
+names(test_scaled) <- make.names(names(test_scaled))
+
+# Definir os nomes das features excluindo 'atrasou'
+features <- names(train_scaled)
+features <- features[!features %in% "atrasou"]
+
+# Definir a fórmula para o modelo
+formula <- as.formula(paste("atrasou ~", paste(features, collapse = " + ")))
+
+# Imprimir a fórmula e os nomes das colunas para verificação
+print("Fórmula do modelo:")
+print(formula)
+print("Nomes das colunas em train_scaled:")
+print(names(train_scaled))
+
+# Treinar o modelo de rede neural
+set.seed(123)
+modeloNNBin <- neuralnet(formula, data = train_scaled, linear.output = FALSE)
+
+# Fazer previsões no conjunto de teste
+predictions <- neuralnet::compute(modeloNNBin, test_scaled[, features])$net.result
+classPred <- ifelse(predictions > 0.5, 1, 0)
+
+# Converter previsões e valores reais em fatores
+classPred <- factor(classPred, levels = c(0, 1))
+actual <- factor(test_scaled$atrasou, levels = c(0, 1))
+
+# Verificar se ambas as classes estão presentes
+if (length(unique(classPred)) > 1 && length(unique(actual)) > 1) {
+  # Calcular a matriz de confusão
+  confMatNNBin <- confusionMatrix(classPred, actual, positive = "1")
+  print(confMatNNBin)
+} else {
+  cat("Aviso: Não foi possível calcular a matriz de confusão porque uma das classes está ausente.\n")
+}
+
+# Calcular a matriz de confusão
+confMatNNBin <- confusionMatrix(classPred, actual, positive = "1")
+print(confMatNNBin)
+```
+
+## RN M
+
+```{r}
+# 6. Rede Neural com Variável Endógena Multinomial
+# Criar matriz de design para o conjunto de treinamento
+train_nn_multi <- model.matrix(~ . -1, data = treinoMulti[, predictors_mnomial])
+train_nn_multi <- as.data.frame(train_nn_multi)
+
+# Fazer o mesmo para o conjunto de teste
+test_nn_multi <- model.matrix(~ . -1, data = testeMulti[, predictors_mnomial])
+test_nn_multi <- as.data.frame(test_nn_multi)
+
+# Ajustar o modelo de rede neural multinomial
+set.seed(123)
+modeloNNMulti <- nnet(train_nn_multi, 
+                      class.ind(treinoMulti$cenarios), 
+                      size = 5, 
+                      softmax = TRUE, 
+                      maxit = 200)
+
+# Previsões no conjunto de teste
+probPredNNMulti <- predict(modeloNNMulti, test_nn_multi, type = "raw")
+classPredNNMulti <- apply(probPredNNMulti, 1, which.max)
+
+# Determine the number of classes
+num_classes <- length(levels(treinoMulti$cenarios))
+
+# Create a factor with specified levels and labels
+classPredNNMulti <- factor(classPredNNMulti, 
+                           levels = 1:num_classes, 
+                           labels = levels(treinoMulti$cenarios))
+
+# Matriz de confusão
+confMatNNMulti <- confusionMatrix(classPredNNMulti, testeMulti$cenarios)
+print(confMatNNMulti)
+```
+:::
+
+# Avaliar e Comparar
+
+::: panel-tabset
+## Modelos Binomiais
+
+```{r}
+acuraciaBinomial <- data.frame(
+  Modelo = c("Regressão Logística", "BART", "Rede Neural"),
+  Acuracia = c(ifelse(!is.null(confMatLogistico), confMatLogistico$overall['Accuracy'], NA),
+               ifelse(!is.null(confMatBARTBin), confMatBARTBin$overall['Accuracy'], NA),
+               ifelse(!is.null(confMatNNBin), confMatNNBin$overall['Accuracy'], NA))
+)
+print(acuraciaBinomial)
+
+```
+
+## Modelos Multinomiais
+
+```{r}
+acuraciaMultinomial <- data.frame(
+  Modelo = c("Regressão Multinomial", "BART", "Rede Neural"),
+  Acuracia = c(confMatMultinom$overall['Accuracy'],
+               confusionMatrix(confMatBARTMulti)$overall['Accuracy'],
+               confMatNNMulti$overall['Accuracy'])
+)
+print(acuraciaMultinomial)
+```
+:::

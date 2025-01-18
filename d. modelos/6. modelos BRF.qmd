@@ -1,0 +1,476 @@
+---
+title: "6. modelos BRF"
+author: "Matheus Lazzari Nicola"
+format: 
+  html:
+    math: mathjax
+    code-fold: true
+    code-summary: "mostre-me o código"
+    embed-resources: true
+    df-print: paged 
+    toc: true
+    toc-depth: 2
+    toc-location: left
+    toc-title: sumário executivo
+    grid:
+      sidebar-width: 200px
+      body-width: 900px  
+      margin-width: 200px
+      gutter-width: 1.5em
+editor_options: 
+  chunk_output_type: inline
+---
+
+<style>
+  p {
+    text-align: justify;
+  }
+</style>
+
+# pacotes
+
+```{r}
+#| warning: false
+#| echo: false
+
+pkgs<-c("tidyverse", "conflicted", "patchwork", "pROC",
+        "caret",    # Para dividir os dados e avaliar os modelos
+        # para logit binomial bayesiano
+        "abcrf"     # Para o modelo BRF binomial
+        
+        )
+
+new.packages <- pkgs[!(pkgs %in% installed.packages()[,"Package"])]
+
+if(length(new.packages)) install.packages(new.packages)
+
+invisible(lapply(pkgs, library, character.only = TRUE))
+rm(pkgs, new.packages)
+
+conflict_prefer("filter", "dplyr")
+conflict_prefer("lag", "dplyr")
+conflicts_prefer(neuralnet::compute)
+
+```
+
+# base de dados
+
+```{r}
+setwd("C:/Users/mathe/OneDrive/4.0 Pós-graduação/4.4b Dissertação Mestrado Profissional/d. modelos")
+load("df processo transporte.RData")
+```
+
+
+
+
+
+
+# processo de transporte
+
+## (ipb) inicio do processo binomial
+
+### treino e teste
+
+```{r}
+# Se necessário, balancear os dados de treino binário
+#if (min(table(df_logit_ip$atrasou)) / sum(table(df_logit_ip$atrasou)) < 0.1) {
+#  cat("A variável resposta está desbalanceada. Realizando balanceamento...\n")
+#  balanceamento <- upSample(x = df_logit_ip[, -which(names(df_logit_ip) == 'atrasou')], y = df_logit_ip$atrasou)
+#  df_logit_ip_balanceado <- cbind(balanceamento, atrasou = balanceamento$Class)
+#  df_logit_ip_balanceado$Class <- NULL
+#  df_logit_ip <- df_logit_ip_balanceado
+#} else {
+#  cat("Não precisa balancear!")
+#}
+
+set.seed(123)
+# preditores
+X_ipb <- setdiff(names(df_logit_ip), c('atrasou'))
+
+# Função para verificar se todas as variáveis categóricas têm pelo menos dois níveis
+validar_categoricas <- function(treino, variaveis_categoricas) {
+  all(sapply(treino[, variaveis_categoricas, drop = FALSE], function(x) length(unique(x)) >= 2))
+}
+
+# Lista de variáveis categóricas
+validar_categoricas <- function(treino, teste, variaveis_categoricas) {
+  treino_valido <- all(sapply(treino[, variaveis_categoricas, drop = FALSE], function(x) length(unique(x)) >= 2))
+  teste_valido  <- all(sapply(teste[, variaveis_categoricas, drop = FALSE], function(x) length(unique(x)) >= 2))
+  
+  return(treino_valido && teste_valido)
+  
+}
+
+# Lista de variáveis categóricas
+variaveis_categoricas <- names(df_logit_ip)[sapply(df_logit_ip, is.factor)]
+
+# Loop para garantir que todas as variáveis categóricas no treino e tenham pelo menos dois níveis
+repeat {
+  # Divisão inicial
+  indice_ipb <- createDataPartition(df_logit_ip$atrasou, p = 0.7, list = FALSE)
+  treino_ipb <- df_logit_ip[indice_ipb, ]
+  teste_ipb  <- df_logit_ip[-indice_ipb, ]
+  
+  # Verificar se as variáveis categóricas no treino têm pelo menos dois níveis
+  if (validar_categoricas(treino_ipb, teste_ipb, variaveis_categoricas)) {
+    cat("Divisão bem-sucedida. Todas as variáveis categóricas têm pelo menos dois níveis.\n")
+    break
+  } else {
+    cat("Repetindo a divisão devido a variáveis categóricas com apenas um nível...\n")
+  }
+}
+
+
+```
+
+
+### modelo BRF
+
+```{r}
+# 4. BRF com Variável Endógena Binomial
+
+# Criar a fórmula para o modelo
+formula_ipb <- as.formula(paste("atrasou ~", paste(X_ipb, collapse = " + ")))
+
+# Ajustar o modelo BRF com regAbcrf
+set.seed(123)
+modelo_brf_ipb <- abcrf(formula_ipb, data = treino_ipb, ntree = 50000, paral = TRUE)
+
+# Previsões para os dados de teste
+previsoes_brf_ipb <- predict(modelo_brf_ipb, teste_ipb[, X_ipb], treino_ipb)
+
+# Obter previsões de probabilidade (posterior expectations)
+previsoes_ipb <- previsoes_brf_ipb$allocation
+
+# Obter a probabilidade posterior associada à classe predita
+previsoes_prob_ipb <- previsoes_brf_ipb$post.prob
+
+# Valores reais da variável resposta na base de teste
+y_teste_ipb <- teste_ipb$atrasou
+
+# Calcular a acurácia
+acc_brf_ipb <- sum(previsoes_ipb == y_teste_ipb) / length(y_teste_ipb)
+cat("Acurácia:", round(acc_brf_ipb, 4), "\n")
+
+# Calcular a AUC
+roc_obj_ipb <- roc(y_teste_ipb, previsoes_prob_ipb)
+auc_brf_ipb <- auc(roc_obj_ipb)
+cat("AUC:", round(auc_brf_ipb, 4), "\n")
+
+# Calcular a matriz de confusão
+confMat_brf_ipb <- confusionMatrix(as.factor(previsoes_ipb), as.factor(y_teste_ipb), dnn = c("Prediction", "Reference"))
+
+# Exibir a matriz de confusão
+print(confMat_brf_ipb)
+```
+
+
+
+
+
+
+## (ipm) inicio do processo multinomial
+
+
+### treino e teste
+
+```{r}
+# Se necessário, balancear os dados de treino binário
+#if (min(table(df_mnomial_ip$cenarios)) / sum(table(df_mnomial_ip$cenarios)) < 0.1) {
+#  cat("A variável resposta está desbalanceada. Realizando balanceamento...\n")
+#  balanceamento <- upSample(x = df_mnomial_ip[, -which(names(df_mnomial_ip) == 'cenarios')], y = df_mnomial_ip$cenarios)
+#  df_mnomial_ip_balanceado <- cbind(balanceamento, cenarios = balanceamento$Class)
+#  df_mnomial_ip_balanceado$Class <- NULL
+#  df_mnomial_ip <- df_mnomial_ip_balanceado
+#} else {
+#  cat("Não precisa balancear!")
+#}
+
+set.seed(123)
+# preditores
+X_ipm <- setdiff(names(df_mnomial_ip), c('cenarios'))
+
+# Função para verificar se todas as variáveis categóricas têm pelo menos dois níveis
+validar_categoricas <- function(treino, teste, variaveis_categoricas) {
+  treino_valido <- all(sapply(treino[, variaveis_categoricas, drop = FALSE], function(x) length(unique(x)) >= 2))
+  teste_valido  <- all(sapply(teste[, variaveis_categoricas, drop = FALSE], function(x) length(unique(x)) >= 2))
+  
+  return(treino_valido && teste_valido)
+  
+}
+
+# Lista de variáveis categóricas
+variaveis_categoricas <- names(df_mnomial_ip)[sapply(df_mnomial_ip, is.factor)]
+
+# Loop para garantir que todas as variáveis categóricas no treino e tenham pelo menos dois níveis
+repeat {
+  # Divisão inicial
+  indice_ipm <- createDataPartition(df_mnomial_ip$cenarios, p = 0.7, list = FALSE)
+  treino_ipm <- df_mnomial_ip[indice_ipb, ]
+  teste_ipm  <- df_mnomial_ip[-indice_ipb, ]
+  
+  # Verificar se as variáveis categóricas no treino têm pelo menos dois níveis
+  if (validar_categoricas(treino_ipm, teste_ipm, variaveis_categoricas)) {
+    cat("Divisão bem-sucedida. Todas as variáveis categóricas têm pelo menos dois níveis.\n")
+    break
+  } else {
+    cat("Repetindo a divisão devido a variáveis categóricas com apenas um nível...\n")
+  }
+}
+
+```
+
+
+### modelo BRF
+
+```{r}
+# 4. BRF com Variável Endógena Binomial
+
+# Criar a fórmula para o modelo
+formula_ipm <- as.formula(paste("cenarios ~", paste(X_ipm, collapse = " + ")))
+
+# Ajustar o modelo BRF com regAbcrf
+set.seed(123)
+modelo_brf_ipm <- abcrf(formula_ipm, data = treino_ipm, ntree = 50000, paral = TRUE)
+
+# Previsões para os dados de teste
+previsoes_brf_ipm <- predict(modelo_brf_ipm, teste_ipm[, X_ipm], treino_ipm)
+
+# Obter previsões de probabilidade (posterior expectations)
+previsoes_prob_ipm <- previsoes_brf_ipm$allocation
+
+# Valores reais da variável resposta na base de teste
+y_teste_ipm <- teste_ipm$cenarios
+
+# Calcular a acurácia
+acc_brf_ipm <- sum(previsoes_prob_ipm == y_teste_ipm) / length(y_teste_ipm)
+cat("Acurácia:", round(acc_brf_ipm, 6), "\n")
+
+# Calcular a AUC
+roc_obj_ipm <- multiclass.roc(y_teste_ipm, as.numeric(previsoes_prob_ipm))
+auc_brf_ipm <- auc(roc_obj_ipm)
+cat("AUC:", round(auc_brf_ipm, 6), "\n")
+
+# Calcular a matriz de confusão
+confMat_brf_ipm <- confusionMatrix(as.factor(previsoes_prob_ipm), as.factor(y_teste_ipm), dnn = c("Prediction", "Reference"))
+
+# Exibir a matriz de confusão
+print(confMat_brf_ipm)
+
+```
+
+
+
+
+
+## (tpb) todo do processo binomial
+
+### treino e teste
+
+```{r}
+# Se necessário, balancear os dados de treino binário
+#if (min(table(df_logit_tp$atrasou)) / sum(table(df_logit_tp$atrasou)) < 0.1) {
+#  cat("A variável resposta está desbalanceada. Realizando balanceamento...\n")
+#  balanceamento <- upSample(x = df_logit_tp[, -which(names(df_logit_tp) == 'atrasou')], y = df_logit_tp$atrasou)
+#  df_logit_tp_balanceado <- cbind(balanceamento, atrasou = balanceamento$Class)
+#  df_logit_tp_balanceado$Class <- NULL
+#  df_logit_tp <- df_logit_tp_balanceado
+#} else {
+#  cat("Não precisa balancear!")
+#}
+
+set.seed(123)
+# preditores
+X_tpb <- setdiff(names(df_logit_tp), c('atrasou'))
+
+# Função para verificar se todas as variáveis categóricas têm pelo menos dois níveis
+validar_categoricas <- function(treino, teste, variaveis_categoricas) {
+  treino_valido <- all(sapply(treino[, variaveis_categoricas, drop = FALSE], function(x) length(unique(x)) >= 2))
+  teste_valido  <- all(sapply(teste[, variaveis_categoricas, drop = FALSE], function(x) length(unique(x)) >= 2))
+  
+  return(treino_valido && teste_valido)
+  
+}
+
+# Lista de variáveis categóricas
+variaveis_categoricas <- names(df_logit_tp)[sapply(df_logit_tp, is.factor)]
+
+# Loop para garantir que todas as variáveis categóricas no treino e tenham pelo menos dois níveis
+repeat {
+  # Divisão inicial
+  indice_tpb <- createDataPartition(df_logit_tp$atrasou, p = 0.7, list = FALSE)
+  treino_tpb <- df_logit_tp[indice_tpb, ]
+  teste_tpb  <- df_logit_tp[-indice_tpb, ]
+  
+  # Verificar se as variáveis categóricas no treino têm pelo menos dois níveis
+  if (validar_categoricas(treino_tpb, teste_tpb, variaveis_categoricas)) {
+    cat("Divisão bem-sucedida. Todas as variáveis categóricas têm pelo menos dois níveis.\n")
+    break
+  } else {
+    cat("Repetindo a divisão devido a variáveis categóricas com apenas um nível...\n")
+  }
+}
+
+```
+
+
+### modelo BRF
+
+```{r}
+# 4. BRF com Variável Endógena Binomial
+
+# Criar a fórmula para o modelo
+formula_tpb <- as.formula(paste("atrasou ~", paste(X_tpb, collapse = " + ")))
+
+# Ajustar o modelo BRF com regAbcrf
+set.seed(123)
+modelo_brf_tpb <- abcrf(formula_tpb, data = treino_tpb, ntree = 50000, paral = TRUE)
+
+# Previsões para os dados de teste
+previsoes_brf_tpb <- predict(modelo_brf_tpb, teste_tpb[, X_tpb], treino_tpb)
+
+# Obter previsões de probabilidade (posterior expectations)
+previsoes_tpb <- previsoes_brf_tpb$allocation
+
+# Obter a probabilidade posterior associada à classe predita
+previsoes_prob_tpb <- previsoes_brf_tpb$post.prob
+
+# Valores reais da variável resposta na base de teste
+y_teste_tpb <- teste_tpb$atrasou
+
+# Calcular a acurácia
+acc_brf_tpb <- sum(previsoes_tpb == y_teste_tpb) / length(y_teste_tpb)
+cat("Acurácia:", round(acc_brf_tpb, 4), "\n")
+
+# Calcular a AUC
+roc_obj_tpb <- roc(y_teste_tpb, previsoes_prob_tpb)
+auc_brf_tpb <- auc(roc_obj_tpb)
+cat("AUC:", round(auc_brf_tpb, 4), "\n")
+
+# Converter probabilidades em previsões binárias usando 0.5 como ponto de corte
+previsoes_bin_tpb <- ifelse(previsoes_prob_tpb > 0.5, 1, 0)
+# Calcular a matriz de confusão
+confMat_brf_tpb <- confusionMatrix(as.factor(previsoes_bin_tpb), as.factor(y_teste_tpb), dnn = c("Prediction", "Reference"))
+
+# Exibir a matriz de confusão
+print(confMat_brf_tpb)
+
+```
+
+
+
+
+## (tpm) todo do processo multinomial
+
+
+
+### treino e teste
+
+```{r}
+# Se necessário, balancear os dados de treino binário
+#if (min(table(df_mnomial_tp$cenarios)) / sum(table(df_mnomial_tp$cenarios)) < 0.1) {
+#  cat("A variável resposta está desbalanceada. Realizando balanceamento...\n")
+#  balanceamento <- upSample(x = df_mnomial_tp[, -which(names(df_mnomial_tp) == 'cenarios')], y = df_mnomial_tp$cenarios)
+#  df_mnomial_tp_balanceado <- cbind(balanceamento, cenarios = balanceamento$Class)
+#  df_mnomial_tp_balanceado$Class <- NULL
+#  df_mnomial_tp <- df_mnomial_tp_balanceado
+#} else {
+#  cat("Não precisa balancear!")
+#}
+
+set.seed(123)
+# preditores
+X_tpm <- setdiff(names(df_mnomial_tp), c('cenarios'))
+
+# Função para verificar se todas as variáveis categóricas têm pelo menos dois níveis
+validar_categoricas <- function(treino, teste, variaveis_categoricas) {
+  treino_valido <- all(sapply(treino[, variaveis_categoricas, drop = FALSE], function(x) length(unique(x)) >= 2))
+  teste_valido  <- all(sapply(teste[, variaveis_categoricas, drop = FALSE], function(x) length(unique(x)) >= 2))
+  
+  return(treino_valido && teste_valido)
+  
+}
+
+# Lista de variáveis categóricas
+variaveis_categoricas <- names(df_mnomial_tp)[sapply(df_mnomial_tp, is.factor)]
+
+# Loop para garantir que todas as variáveis categóricas no treino e tenham pelo menos dois níveis
+repeat {
+  # Divisão inicial
+  indice_tpm <- createDataPartition(df_mnomial_tp$cenarios, p = 0.7, list = FALSE)
+  treino_tpm <- df_mnomial_tp[indice_tpm, ]
+  teste_tpm  <- df_mnomial_tp[-indice_tpm, ]
+  
+  # Verificar se as variáveis categóricas no treino têm pelo menos dois níveis
+  if (validar_categoricas(treino_tpm, teste_tpm, variaveis_categoricas)) {
+    cat("Divisão bem-sucedida. Todas as variáveis categóricas têm pelo menos dois níveis.\n")
+    break
+  } else {
+    cat("Repetindo a divisão devido a variáveis categóricas com apenas um nível...\n")
+  }
+}
+
+```
+
+### modelo BART
+
+```{r}
+# Criar a fórmula para o modelo
+formula_tpm <- as.formula(paste("cenarios ~", paste(X_tpm, collapse = " + ")))
+
+# Ajustar o modelo BRF com regAbcrf
+set.seed(123)
+modelo_brf_tpm <- abcrf(formula_tpm, data = treino_tpm, ntree = 50000, paral = TRUE)
+
+# Previsões para os dados de teste
+previsoes_brf_tpm <- predict(modelo_brf_tpm, teste_tpm[, X_tpm], treino_tpm)
+
+# Obter previsões de probabilidade (posterior expectations)
+previsoes_prob_tpm <- previsoes_brf_tpm$allocation
+
+# Valores reais da variável resposta na base de teste
+y_teste_tpm <- teste_tpm$cenarios
+
+# Calcular a acurácia
+acc_brf_tpm <- sum(previsoes_prob_tpm == y_teste_tpm) / length(y_teste_tpm)
+cat("Acurácia:", round(acc_brf_tpm, 6), "\n")
+
+# Calcular a AUC
+roc_obj_tpm <- multiclass.roc(y_teste_tpm, as.numeric(previsoes_prob_tpm))
+auc_brf_tpm <- auc(roc_obj_tpm)
+cat("AUC:", round(auc_brf_tpm, 6), "\n")
+
+
+# Calcular a matriz de confusão
+confMat_brf_tpm <- confusionMatrix(as.factor(previsoes_prob_tpm), as.factor(y_teste_tpm), dnn = c("Prediction", "Reference"))
+
+# Exibir a matriz de confusão
+print(confMat_brf_tpm)
+```
+
+
+# resultados
+
+```{r}
+
+resultados.d <- data.frame(
+  Modelo = c("BRF binomial", "BRF multinomial"),
+  Acc.ip = c(acc_brf_ipb, acc_brf_ipm),
+  #BIC.ip = c(bic_ipb, bic_ipm,0),
+  AUC.ip = c(auc_brf_ipb, auc_brf_ipm),
+  
+  Acc.tp  = c(acc_brf_tpb, acc_brf_tpm),
+  #BIC.tp = c(bic_tpb, bic_tpm,0),
+  AUC.tp = c(auc_brf_tpb, auc_brf_tpm)
+  )
+
+print(resultados.d)
+
+load("resultados02.RData")
+
+resultados.e <- rbind(resultados.c, resultados.d)
+
+print(resultados.e)
+
+save(resultados.e, file ="resultados03.RData")
+```
